@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 import warnings
@@ -9,6 +10,9 @@ import warnings
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error, roc_auc_score
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "FastAPI-Backend"))
 
 from bkt_engine import ScienceBKT
 
@@ -230,11 +234,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate BKT predictive accuracy with in-sample and user-holdout metrics."
     )
-    parser.add_argument("--data-path", default="synthetic_logs.csv", help="Path to training/eval CSV")
+    parser.add_argument(
+        "--data-path",
+        default=str(PROJECT_ROOT / "Data" / "synthetic_logs.csv"),
+        help="Path to training/eval CSV",
+    )
     parser.add_argument("--test-ratio", type=float, default=0.2, help="Fraction of users per topic for holdout test")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for user split")
     parser.add_argument("--auc-target", type=float, default=0.75, help="Proposal target threshold for AUC")
-    parser.add_argument("--output-dir", default="evaluation_outputs", help="Directory for csv/json outputs")
+    parser.add_argument(
+        "--output-dir",
+        default=str(PROJECT_ROOT / "evaluation_outputs"),
+        help="Directory for csv/json outputs",
+    )
     args = parser.parse_args()
 
     if not (0.05 <= args.test_ratio <= 0.8):

@@ -131,7 +131,7 @@ def load_topic_ids(base_dir: Path) -> list[str]:
         return read_topic_ids_from_xlsx(xlsx_path)
 
     raise FileNotFoundError(
-        "Could not find Skill-Heirarchies.csv or Skill-Heirarchies.xlsx in the current directory."
+        "Could not find Skill-Heirarchies.csv or Skill-Heirarchies.xlsx in Data/."
     )
 
 
@@ -205,12 +205,13 @@ def generate_synthetic_logs(topic_ids: list[str], output_path: Path) -> None:
 
 def main() -> None:
     """Script entrypoint: load skills, generate CSV, print summary."""
-    base_dir = Path(__file__).resolve().parent
-    topic_ids = load_topic_ids(base_dir)
+    project_root = Path(__file__).resolve().parent.parent
+    data_dir = project_root / "Data"
+    topic_ids = load_topic_ids(data_dir)
     # Keep total rows aligned with users x skills x attempts.
     global TOTAL_ROWS
     TOTAL_ROWS = DEFAULT_USERS * len(topic_ids) * ATTEMPTS_PER_USER_SKILL
-    output_path = base_dir / "synthetic_logs.csv"
+    output_path = data_dir / "synthetic_logs.csv"
     generate_synthetic_logs(topic_ids, output_path)
     print(f"Generated {TOTAL_ROWS} rows in {output_path.name} using {len(topic_ids)} topic IDs.")
 

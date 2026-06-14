@@ -23,9 +23,11 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-# --- Defaults (same folder as this file) ---
-_DEFAULT_PDF = "science G-6 E (1).pdf"
-_CHROMA_DIR = ".chroma_science_g6"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# --- Defaults (repo root + Data/) ---
+_DEFAULT_PDF = PROJECT_ROOT / "Data" / "Syllabi" / "science G-6 E (1).pdf"
+_CHROMA_DIR = PROJECT_ROOT / ".chroma_science_g6"
 _COLLECTION = "science_g6_syllabus"
 _EMBED_MODEL = "all-MiniLM-L6-v2"  # sentence-transformers id (Chroma embedding_fn)
 _CHROMA_ADD_BATCH = 256
@@ -172,9 +174,9 @@ class LocalScienceKnowledgeBase:
         pdf_path: Optional[Path | str] = None,
         persist_directory: Optional[Path | str] = None,
     ) -> None:
-        self.base_dir = Path(__file__).resolve().parent
-        self.pdf_path = Path(pdf_path) if pdf_path else self.base_dir / _DEFAULT_PDF
-        self.persist_directory = Path(persist_directory) if persist_directory else self.base_dir / _CHROMA_DIR
+        self.base_dir = PROJECT_ROOT
+        self.pdf_path = Path(pdf_path) if pdf_path else _DEFAULT_PDF
+        self.persist_directory = Path(persist_directory) if persist_directory else _CHROMA_DIR
         self._chroma_client: Any = None
         self._collection: Any = None
         self._embedding_fn: Any = None

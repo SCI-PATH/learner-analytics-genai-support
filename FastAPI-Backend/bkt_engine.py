@@ -48,6 +48,8 @@ except ImportError as exc:
         "pyBKT is required. Install it with: pip install pyBKT"
     ) from exc
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 class ScienceBKT:
     def __init__(self, data_path: str = "synthetic_logs.csv", seed: int = 42, num_fits: int = 1):
@@ -109,24 +111,24 @@ class ScienceBKT:
     @staticmethod
     def _resolve_data_path(data_path: str) -> Path:
         """
-        Resolve CSV path robustly after project reorganization.
+        Resolve CSV path relative to repo root or Data/.
 
         Search order:
         1) Provided path as-is (relative to current working directory).
-        2) Path relative to this module's directory.
-        3) `DOCS/synthetic_logs.csv` relative to this module's directory.
+        2) Path relative to repo root.
+        3) `Data/<filename>` under repo root.
         """
         raw = Path(data_path)
-        if raw.exists():
-            return raw
-        module_dir = Path(__file__).resolve().parent
-        candidate_local = module_dir / data_path
-        if candidate_local.exists():
-            return candidate_local
-        candidate_docs = module_dir / "DOCS" / "synthetic_logs.csv"
-        if candidate_docs.exists():
-            return candidate_docs
-        return raw
+        if raw.is_file():
+            return raw.resolve()
+        candidates = (
+            PROJECT_ROOT / raw,
+            PROJECT_ROOT / "Data" / raw.name,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        return (PROJECT_ROOT / "Data" / raw.name).resolve()
 
     @staticmethod
     def _read_env_float(name: str, default: float, lo: float, hi: float) -> float:

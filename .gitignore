@@ -1,0 +1,36 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Secrets (NEVER commit) ---
+.env
+
+# --- Generated / runtime ---
+.chroma_science_g6/
+FastAPI-Backend/.chroma_science_g6/
+live_state_events.db
+interaction_logs.json
+FastAPI-Backend/live_state_events.db
+FastAPI-Backend/interaction_logs.json
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Optional: large external data ---
+Data/external/
+**/Log_Problem.csv
+
+# --- Optional: generated eval outputs ---
+outputs/
+evaluation_outputs/

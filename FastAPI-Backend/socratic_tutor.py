@@ -30,6 +30,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
@@ -38,6 +39,9 @@ from langchain_groq import ChatGroq
 
 from bkt_engine import ScienceBKT
 from knowledge_base import _TOPIC_KEYWORDS, retrieve_context
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_PATH = PROJECT_ROOT / ".env"
 
 _default_bkt: Optional[ScienceBKT] = None
 _DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -131,7 +135,7 @@ def get_shared_bkt_engine() -> ScienceBKT:
 
 def _make_llm_client() -> tuple[Any, str]:
     """Return (ChatGroq client, model_name)."""
-    load_dotenv()
+    load_dotenv(_ENV_PATH)
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
@@ -156,7 +160,7 @@ def _make_llm_client() -> tuple[Any, str]:
 
 def _tutor_bkt_policy() -> Literal["quiz_only", "strict", "legacy"]:
     """How chat turns update BKT; default ``strict`` to avoid falsely rising mastery."""
-    load_dotenv()
+    load_dotenv(_ENV_PATH)
     raw = (os.environ.get("TUTOR_BKT_POLICY") or "strict").strip().lower()
     if raw in {"quiz_only", "quiz-only", "off", "false", "0", "none", "assessment_only"}:
         return "quiz_only"
@@ -454,7 +458,7 @@ def generate_socratic_hint(
     """
     # Ensure .env variables (including HF_TOKEN / GROQ_API_KEY) are available
     # before retrieval and model calls.
-    load_dotenv()
+    load_dotenv(_ENV_PATH)
 
     engine = bkt or _get_default_bkt()
     mastery_before = float(engine.get_current_mastery_probability(user_id, topic_id))

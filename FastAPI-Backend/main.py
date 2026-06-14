@@ -21,9 +21,13 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Literal, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 import pandas as pd
 from pydantic import BaseModel, Field
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 from bkt_engine import ScienceBKT
 from socratic_tutor import (
@@ -53,8 +57,8 @@ _MASTERY_CRITICAL_THRESHOLD = 0.20
 _replay_engine_cache: Optional[ScienceBKT] = None
 _mastery_matrix_cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], dict[str, dict[str, float | None]]] = {}
 _MASTER_MATRIX_CACHE_MAX = 32
-_LIVE_STATE_DB = Path("live_state_events.db")
-_INTERACTION_LOG_PATH = Path("interaction_logs.json")
+_LIVE_STATE_DB = PROJECT_ROOT / "live_state_events.db"
+_INTERACTION_LOG_PATH = PROJECT_ROOT / "interaction_logs.json"
 _DISTRACTOR_TAGS_BY_TOPIC: dict[str, list[str]] = {
     "G6_S1_ORG_CHARS": [
         "Confused living vs non-living",

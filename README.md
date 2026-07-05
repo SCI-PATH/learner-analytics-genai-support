@@ -11,24 +11,20 @@ From repo root (learner-analytics-genai-support/). Run these in **separate termi
 
 **1. Activate the virtual environment**
 
-`powershell ----
 .\.venv\Scripts\Activate.ps1
-`
-
-**2. Backend (FastAPI)**
-
-`powershell
 cd FastAPI-Backend
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
-`
+
+One liner alternative --- .\.venv\Scripts\Activate.ps1; cd FastAPI-Backend; uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
 **3. Frontends (Streamlit) — use a different port for each app**
 
-`powershell
 # Terminal 1 — tutor
+.\.venv\Scripts\Activate.ps1
 streamlit run Streamlit-UIs/tutor-chatbot.py --server.port 8501
 
 # Terminal 2 — dashboard
+.\.venv\Scripts\Activate.ps1
 streamlit run Streamlit-UIs/teacher_dashboard.py --server.port 8502
 `
 

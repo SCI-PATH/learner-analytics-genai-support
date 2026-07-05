@@ -17,6 +17,8 @@ Install:
 
 Environment:
   GROQ_API_KEY (loaded from .env)
+  GROQ_MODEL_NAME: Groq model id (default ``openai/gpt-oss-120b``).
+  TUTOR_LLM_MAX_TOKENS: optional int (default ``512``).
   TUTOR_BKT_POLICY: how dialogue updates BKT — ``strict`` (default): only clear
     correct/incorrect scores update mastery; ambiguous mid scores skip updates.
     ``quiz_only``: never update BKT from chat; use ``/api/v1/assessment-submit`` only.
@@ -44,7 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = PROJECT_ROOT / ".env"
 
 _default_bkt: Optional[ScienceBKT] = None
-_DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+_DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 _frustration_state: dict[tuple[str, str], "FrustrationSignal"] = {}
 
 
@@ -141,7 +143,10 @@ def _make_llm_client() -> tuple[Any, str]:
         raise RuntimeError(
             "GROQ_API_KEY is missing. Add it to your .env file."
         )
-    model = _DEFAULT_GROQ_MODEL
+    model = (
+        os.environ.get("GROQ_MODEL_NAME", _DEFAULT_GROQ_MODEL).strip()
+        or _DEFAULT_GROQ_MODEL
+    )
     temp_raw = os.environ.get("TUTOR_LLM_TEMPERATURE", "").strip()
     temperature = 0.35
     if temp_raw:
@@ -150,12 +155,49 @@ def _make_llm_client() -> tuple[Any, str]:
         except ValueError:
             temperature = 0.35
     temperature = max(0.0, min(1.5, temperature))
-    client = ChatGroq(
-        model_name="llama-3.3-70b-versatile",
-        api_key=api_key,
-        temperature=temperature,
-    )
+    client_kwargs: dict[str, Any] = {
+        "model_name": model,
+        "api_key": api_key,
+        "temperature": temperature,
+    }
+    # GPT-OSS models are reasoning models: without a low effort setting they
+    # can consume the entire token budget on hidden reasoning and return empty
+    # visible content (finish_reason=length), which breaks JSON hint parsing.
+    if "gpt-oss" in model.lower():
+        client_kwargs["reasoning_effort"] = "low"
+    client = ChatGroq(**client_kwargs)
     return client, model
+
+
+def _llm_response_text(content: Any) -> str:
+    """Normalize LangChain message content to a plain string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+            else:
+                text = getattr(block, "text", None) or getattr(block, "content", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts).strip()
+    return str(content).strip()
+
+
+def _tutor_llm_max_tokens() -> int:
+    raw = os.environ.get("TUTOR_LLM_MAX_TOKENS", "512").strip()
+    try:
+        return max(256, min(1024, int(raw)))
+    except ValueError:
+        return 512
 
 
 def _tutor_bkt_policy() -> Literal["quiz_only", "strict", "legacy"]:
@@ -497,9 +539,9 @@ def generate_socratic_hint(
                     SystemMessage(content=_system_prompt(mode, tone_guidance)),
                     HumanMessage(content=user_block),
                 ],
-                max_tokens=380,
+                max_tokens=_tutor_llm_max_tokens(),
             )
-            raw_content = (response.content or "").strip()
+            raw_content = _llm_response_text(response.content)
             h_text, p_score, p_err = _parse_llm_json_payload(raw_content)
             return h_text, p_score, p_err
 

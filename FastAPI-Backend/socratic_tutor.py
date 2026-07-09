@@ -40,7 +40,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from bkt_engine import ScienceBKT
-from knowledge_base import _TOPIC_KEYWORDS, retrieve_context
+from knowledge_base import _TOPIC_KEYWORDS, _TOPIC_QUERY_BOOST, retrieve_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = PROJECT_ROOT / ".env"
@@ -48,6 +48,19 @@ _ENV_PATH = PROJECT_ROOT / ".env"
 _default_bkt: Optional[ScienceBKT] = None
 _DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 _frustration_state: dict[tuple[str, str], "FrustrationSignal"] = {}
+_last_resolved_topic_by_user: dict[str, str] = {}
+
+# Extra student phrasing aliases layered on top of syllabus keywords (all grades).
+_STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
+    "G6_S1_ORG_CHARS": [
+        "living thing", "non living", "alive", "not alive", "grow", "breathe",
+        "reproduce", "reproduction", "respond", "sensitive",
+    ],
+    "G7_S1_PLA_CLASSIF": ["monocot", "dicot", "monocots", "dicots"],
+    "G8_S3_PHO_PROCESS": ["photosynthesis", "chlorophyll", "glucose"],
+    "G9_S3_LIG_REFRAC": ["refraction", "refract", "critical angle"],
+    "G9_S4_SOU_PROPAG": ["sound wave", "frequency", "amplitude", "pitch"],
+}
 
 
 @dataclass
@@ -271,7 +284,6 @@ def _system_prompt(
     mode: Literal["scaffold", "balanced", "nudge"],
     tone_guidance: str,
 ) -> str:
-    textbook = "science G-6 E (1).pdf"
     mode_block = {
         "scaffold": (
             "MASTERY MODE: SCAFFOLD (estimated P(L) < 0.5). Assume fragile understanding.\n"
@@ -305,9 +317,10 @@ def _system_prompt(
 
     return (
         f"You are a Grade 6–9 science tutor using a state-aware Socratic method. Your science "
-        f"authority is ONLY the retrieved excerpts from the textbook **{textbook}** (shown in "
-        f"the user message). If the student's answer contradicts those excerpts, gently correct "
-        f"using the textbook's definitions and wording priority—not the student's mistaken labels "
+        f"authority is ONLY the **retrieved textbook excerpts** shown in the user message "
+        f"(from the official syllabus PDFs for the matched lesson). If the student's answer "
+        f"contradicts those excerpts, gently correct using the textbook's definitions and "
+        f"wording priority—not the student's mistaken labels "
         f"(e.g. confusing energy *forms* with energy *sources*).\n\n"
         f"NO DIRECT SOLUTIONS: Never give the full final answer, full numeric result, or a "
         f"complete worked solution. Scaffolding is allowed.\n\n"
@@ -341,7 +354,7 @@ def _system_prompt(
         f"{mode_block}\n\n"
         f"--- interaction_score (for the JSON field only; not shown in hint_text) ---\n"
         f"Set \"interaction_score\" from 0.0 to 1.0 reflecting how well their **latest** answer "
-        f"matches correct science per {textbook}. Be **calibrated**: wrong or clearly confused "
+        f"matches correct science per the retrieved textbook excerpts. Be **calibrated**: wrong or clearly confused "
         f"answers should usually be **≤0.35**; major misconception **≤0.25**; only strong, clearly "
         f"correct answers **≥0.78**.\n"
         f"  • 0.0–0.35: wrong, vague, or major misconception\n"
@@ -408,62 +421,107 @@ def _socratic_discounted_bkt_label(interaction_score: float) -> int:
     return 1 if discounted >= 0.25 else 0
 
 
+def _score_text_for_topic(text: str, topic_id: str) -> int:
+    """Keyword + boost phrase scoring for one topic against normalized student text."""
+    low = text.lower()
+    words = set(re.sub(r"[^\w\s]", " ", low).split())
+    score = 0
+    keywords = list(_TOPIC_KEYWORDS.get(topic_id, []))
+    keywords.extend(_STUDENT_TOPIC_ALIASES.get(topic_id, []))
+    boost = _TOPIC_QUERY_BOOST.get(topic_id, "")
+    if boost:
+        keywords.append(boost.lower())
+
+    for kw in keywords:
+        kw_low = kw.lower().strip()
+        if not kw_low:
+            continue
+        if kw_low in low:
+            score += low.count(kw_low) + 2
+            continue
+        for w in words:
+            if len(w) < 4 or len(kw_low) < 4:
+                continue
+            if w.startswith(kw_low[:4]) or kw_low.startswith(w[:4]):
+                score += 1
+                break
+    return score
+
+
+def _prior_user_message(
+    conversation_history: Optional[list[dict[str, Any]]],
+) -> Optional[str]:
+    if not conversation_history:
+        return None
+    for turn in reversed(conversation_history):
+        if not isinstance(turn, dict):
+            continue
+        if str(turn.get("role") or "").strip().lower() == "user":
+            content = str(turn.get("content") or "").strip()
+            if content:
+                return content
+    return None
+
+
+def _scope_history_for_topic(
+    user_id: str,
+    resolved_topic: str,
+    conversation_history: Optional[list[dict[str, Any]]],
+) -> tuple[Optional[list[dict[str, Any]]], bool]:
+    """
+    When the learner switches lessons mid-chat, drop prior transcript so the LLM
+    is not conditioned on a different topic. BKT remains per-topic regardless.
+    """
+    uid = str(user_id)
+    prior_topic = _last_resolved_topic_by_user.get(uid)
+    topic_changed = bool(prior_topic and prior_topic != resolved_topic)
+    _last_resolved_topic_by_user[uid] = resolved_topic
+    if topic_changed:
+        return None, True
+    return conversation_history, False
+
+
+def _retrieval_source_summary(kb: dict[str, Any]) -> str:
+    sources: set[str] = set()
+    for ctx in kb.get("contexts") or []:
+        if not isinstance(ctx, dict):
+            continue
+        meta = ctx.get("metadata") or {}
+        if isinstance(meta, dict):
+            name = str(meta.get("source_pdf") or "").strip()
+            if name:
+                sources.add(name)
+    if sources:
+        return ", ".join(sorted(sources))
+    return "official syllabus PDFs (grade 6–9)"
+
+
 def infer_topic_id_from_question(
     student_answer: str,
     *,
+    conversation_history: Optional[list[dict[str, Any]]] = None,
     fallback_topic_id: str = "G6_S1_ORG_CHARS",
 ) -> str:
     """
-    Infer the most likely topic_id using keyword overlap against syllabus topic keywords.
+    Infer topic_id from natural language using the expanded ``_TOPIC_KEYWORDS`` catalog.
 
-    This is intended for API calls where only question text is provided.
+    Scores the latest student message; for short follow-ups (e.g. \"why?\", \"yes\"),
+    also scores against the most recent prior user turn.
     """
     text = student_answer.strip().lower()
     if not text:
         return fallback_topic_id
 
-    # Normalize punctuation so phrase matching is less brittle.
     text = re.sub(r"[^\w\s]", " ", text)
-    words = set(text.split())
+    scoring_segments = [text]
+    prior = _prior_user_message(conversation_history)
+    if prior and len(text.split()) <= 4:
+        scoring_segments.append(re.sub(r"[^\w\s]", " ", prior.strip().lower()))
 
     best_topic = fallback_topic_id
     best_score = 0
-
-    # Extra aliases for common Grade-6 biology wording used by students.
-    biology_aliases = {
-        "G6_S1_ORG_CHARS": [
-            "living thing",
-            "non living",
-            "alive",
-            "not alive",
-            "grow",
-            "breath",
-            "breathe",
-            "reproduce",
-            "reproduction",
-            "respond",
-            "sensitive",
-        ]
-    }
-
-    for topic_id, keywords in _TOPIC_KEYWORDS.items():
-        score = 0
-        all_keywords = list(keywords) + biology_aliases.get(topic_id, [])
-        for kw in all_keywords:
-            kw_low = kw.lower()
-            if kw_low in text:
-                score += text.count(kw_low) + 2
-                continue
-
-            # Lightweight fuzzy token match:
-            # if any student word starts with the keyword root (or vice versa),
-            # award a small score to reduce misses like "reproduce" vs "reproduction".
-            for w in words:
-                if len(w) < 4:
-                    continue
-                if w.startswith(kw_low[:4]) or kw_low.startswith(w[:4]):
-                    score += 1
-                    break
+    for topic_id in _TOPIC_KEYWORDS:
+        score = sum(_score_text_for_topic(segment, topic_id) for segment in scoring_segments)
         if score > best_score:
             best_score = score
             best_topic = topic_id
@@ -488,7 +546,7 @@ def generate_socratic_hint(
     Parameters
     ----------
     user_id, topic_id :
-        Passed through to the learner model and retriever (topic_id must match log skill ids, e.g. G6_...).
+        Passed through to the learner model and retriever (topic_id must match log skill ids, e.g. G6_... / G7_...).
     student_answer :
         The learner's latest free-text response.
     conversation_history :
@@ -506,6 +564,7 @@ def generate_socratic_hint(
     mastery_before = float(engine.get_current_mastery_probability(user_id, topic_id))
     kb = retrieve_context(topic_id, k=context_k)
     facts = (kb.get("facts_text") or "").strip()
+    source_summary = _retrieval_source_summary(kb)
     mode = _hint_mode(mastery_before)
     frustration_signal = _get_frustration_signal(user_id, topic_id)
     tone_guidance = _tone_guidance_from_frustration(frustration_signal)
@@ -524,7 +583,7 @@ def generate_socratic_hint(
         f"frustration_signal_score: "
         f"{frustration_signal.frustration_score if frustration_signal else 'unknown'}\n\n"
         f"{thread_prefix}"
-        f"Textbook excerpts from science G-6 E (1).pdf (retrieved chunks; may be partial):\n"
+        f"Retrieved textbook excerpts ({source_summary}; may be partial):\n"
         f"{facts if facts else '[no excerpts retrieved]'}\n\n"
         f"Student's **latest** message (verbatim; reply to Tutor above if answering a question):\n"
         f"{student_answer.strip() or '[empty]'}\n"
@@ -670,19 +729,30 @@ def generate_socratic_hint_auto_topic(
     """
     Generate a hint when only free-text question/answer is provided.
 
-    If topic_id is omitted, infer it from question keywords.
+    If topic_id is omitted, infer it from question keywords each turn.
+    When the inferred topic changes, prior chat history is not sent to the LLM.
     """
-    resolved_topic = topic_id or infer_topic_id_from_question(student_answer)
+    resolved_topic = topic_id or infer_topic_id_from_question(
+        student_answer,
+        conversation_history=conversation_history,
+    )
+    scoped_history, topic_changed = _scope_history_for_topic(
+        user_id,
+        resolved_topic,
+        conversation_history,
+    )
     result = generate_socratic_hint(
         user_id=user_id,
         topic_id=resolved_topic,
         student_answer=student_answer,
-        conversation_history=conversation_history,
+        conversation_history=scoped_history,
         bkt=bkt,
         context_k=context_k,
     )
     result["topic_id_inferred"] = topic_id is None
     result["topic_id_resolved"] = resolved_topic
+    result["topic_changed"] = topic_changed
+    result["history_turns_sent"] = len(scoped_history or [])
     return result
 
 

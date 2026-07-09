@@ -1,8 +1,17 @@
 import csv
 import random
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from typing import Any
+
+_TOPIC_ID_RE = re.compile(r"^G[6-9]_", re.IGNORECASE)
+
+
+def _is_valid_topic_id(value: str) -> bool:
+    """Accept curriculum topic IDs for grades 6–9; skip section headers like GRADE 7."""
+    return bool(_TOPIC_ID_RE.match(value.strip()))
 
 
 # Total rows = DEFAULT_USERS * len(topic_ids) * ATTEMPTS_PER_USER_SKILL (set in main()).
@@ -47,7 +56,7 @@ def read_topic_ids_from_csv(csv_path: Path) -> list[str]:
         topic_ids = []
         for row in reader:
             value = (row.get(topic_col) or "").strip()
-            if value:
+            if value and _is_valid_topic_id(value):
                 topic_ids.append(value)
 
     # De-duplicate while preserving source order.
@@ -59,12 +68,51 @@ def read_topic_ids_from_csv(csv_path: Path) -> list[str]:
 
 def read_topic_ids_from_xlsx(xlsx_path: Path) -> list[str]:
     """
-    Read topic IDs directly from XLSX without external dependencies.
+    Read topic IDs from XLSX.
 
-    XLSX is a ZIP of XML files. We read:
-    - shared string table (`xl/sharedStrings.xml`) for string values
-    - first worksheet (`xl/worksheets/sheet1.xml`) for row/cell values
+    Prefer openpyxl (handles sparse rows). Fall back to stdlib ZIP/XML parsing.
     """
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        wb.close()
+        return _topic_ids_from_sheet_rows(rows, xlsx_path)
+    except ImportError:
+        return _read_topic_ids_from_xlsx_zip(xlsx_path)
+
+
+def _topic_ids_from_sheet_rows(rows: list[list[Any]], source: Path) -> list[str]:
+    if not rows:
+        raise ValueError(f"No rows found in {source}")
+
+    headers = [str(h or "") for h in rows[0]]
+    normalized_headers = [_normalize_header(h) for h in headers]
+    topic_idx = None
+    for idx, h in enumerate(normalized_headers):
+        if "topic" in h and "id" in h:
+            topic_idx = idx
+            break
+    if topic_idx is None:
+        topic_idx = 0
+
+    topic_ids: list[str] = []
+    for row in rows[1:]:
+        if topic_idx >= len(row):
+            continue
+        value = str(row[topic_idx] or "").strip()
+        if value and _is_valid_topic_id(value):
+            topic_ids.append(value)
+
+    unique_topic_ids = list(dict.fromkeys(topic_ids))
+    if not unique_topic_ids:
+        raise ValueError(f"No topic IDs found in {source}")
+    return unique_topic_ids
+
+
+def _read_topic_ids_from_xlsx_zip(xlsx_path: Path) -> list[str]:
     with zipfile.ZipFile(xlsx_path, "r") as zf:
         shared_strings = []
         if "xl/sharedStrings.xml" in zf.namelist():
@@ -92,46 +140,24 @@ def read_topic_ids_from_xlsx(xlsx_path: Path) -> list[str]:
                     row_values.append(raw)
             rows.append(row_values)
 
-    if not rows:
-        raise ValueError(f"No rows found in {xlsx_path}")
-
-    # Identify the topic-id column from the header row.
-    headers = rows[0]
-    normalized_headers = [_normalize_header(h) for h in headers]
-    topic_idx = None
-    for idx, h in enumerate(normalized_headers):
-        if "topic" in h and "id" in h:
-            topic_idx = idx
-            break
-    if topic_idx is None:
-        topic_idx = 0
-
-    topic_ids = []
-    for row in rows[1:]:
-        if topic_idx < len(row):
-            value = str(row[topic_idx]).strip()
-            if value:
-                topic_ids.append(value)
-
-    # De-duplicate while preserving source order.
-    unique_topic_ids = list(dict.fromkeys(topic_ids))
-    if not unique_topic_ids:
-        raise ValueError(f"No topic IDs found in {xlsx_path}")
-    return unique_topic_ids
+    return _topic_ids_from_sheet_rows(rows, xlsx_path)
 
 
 def load_topic_ids(base_dir: Path) -> list[str]:
-    """Load topic IDs from CSV if available, otherwise from XLSX."""
+    """Load topic IDs from the merged G6–G9 hierarchy (or legacy files)."""
+    merged_xlsx = base_dir / "Skill-Heirarchies-G6-G9.xlsx"
     csv_path = base_dir / "Skill-Heirarchies.csv"
-    xlsx_path = base_dir / "Skill-Heirarchies.xlsx"
+    legacy_xlsx = base_dir / "Skill-Heirarchies.xlsx"
 
+    if merged_xlsx.exists():
+        return read_topic_ids_from_xlsx(merged_xlsx)
     if csv_path.exists():
         return read_topic_ids_from_csv(csv_path)
-    if xlsx_path.exists():
-        return read_topic_ids_from_xlsx(xlsx_path)
+    if legacy_xlsx.exists():
+        return read_topic_ids_from_xlsx(legacy_xlsx)
 
     raise FileNotFoundError(
-        "Could not find Skill-Heirarchies.csv or Skill-Heirarchies.xlsx in Data/."
+        "Could not find Skill-Heirarchies-G6-G9.xlsx (or legacy hierarchy files) in Data/."
     )
 
 

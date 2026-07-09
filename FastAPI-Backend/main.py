@@ -97,6 +97,43 @@ _DISTRACTOR_TAGS_BY_TOPIC: dict[str, list[str]] = {
     ],
 }
 
+# Grade 7–9 placeholder distractor tags (profile analytics; extend as rubrics mature).
+_G7_G9_TOPIC_IDS: list[str] = [
+    "G7_S1_PLA_DIVER", "G7_S1_PLA_CLASSIF", "G7_S2_STA_CHARGES", "G7_S2_STA_CAPACIT",
+    "G7_S3_ELE_SOURCES", "G7_S3_ELE_CURRENTS", "G7_S4_WAT_SOLVENT", "G7_S4_WAT_COOLANT",
+    "G7_S5_ACI_IDENTIF", "G7_S5_ACI_INDICAT", "G7_S6_ANI_CLASSIF", "G7_S6_ANI_ADAPTAT",
+    "G7_S7_ENE_FORMS", "G7_S7_ENE_TRANSF", "G7_S8_EAR_STRUCT", "G7_S8_EAR_TECTON",
+    "G7_S9_LIG_SHADOWS", "G7_S9_LIG_MIRRORS", "G7_S10_MIC_LIGHT", "G7_S10_MIC_ELECTR",
+    "G8_S1_BIO_DIVER", "G8_S1_BIO_CLASSIF", "G8_S2_TIS_PLANT", "G8_S2_TIS_ANIMAL",
+    "G8_S3_PHO_PROCESS", "G8_S3_PHO_IMPORT", "G8_S4_MAT_ELEMENTS", "G8_S4_MAT_COMPOUNDS",
+    "G8_S5_MAT_DENSITY", "G8_S5_MAT_THERMAL", "G8_S6_CHA_PHYSICAL", "G8_S6_CHA_BURNING",
+    "G8_S7_FOR_TYPES", "G8_S7_FOR_PRESSURE", "G8_S8_STA_PHENOM", "G8_S8_STA_LIGHTNG",
+    "G9_S1_SYS_DIGEST", "G9_S1_SYS_CIRCUL", "G9_S2_RHY_EARTH", "G9_S2_RHY_CLIMATE",
+    "G9_S3_LIG_REFRAC", "G9_S3_LIG_LENSES", "G9_S4_SOU_PROPAG", "G9_S4_SOU_HEARING",
+    "G9_S5_HEA_EXPANS", "G9_S5_HEA_TRANSF", "G9_S6_NAT_ATOMS", "G9_S6_NAT_CONFIG",
+    "G9_S7_ACI_SALTS", "G9_S7_ACI_NEUTRAL",
+]
+for _tid in _G7_G9_TOPIC_IDS:
+    _DISTRACTOR_TAGS_BY_TOPIC.setdefault(
+        _tid,
+        [
+            f"Misconception on {_tid}",
+            "Partial understanding of key concept",
+            "General science reasoning error",
+        ],
+    )
+
+
+def _distractor_tags_for_topic(topic_id: str) -> list[str]:
+    return _DISTRACTOR_TAGS_BY_TOPIC.get(
+        str(topic_id),
+        [
+            "General misconception",
+            "Incomplete conceptual understanding",
+            "Misapplied science rule",
+        ],
+    )
+
 
 def _append_signal(user_id: str, topic_id: str, value: float) -> None:
     key = (str(user_id), str(topic_id))
@@ -351,7 +388,7 @@ def _replay_user_attempts(
             }
         )
         if not is_correct:
-            tags = _DISTRACTOR_TAGS_BY_TOPIC.get(topic, ["General misconception"])
+            tags = _distractor_tags_for_topic(topic)
             tag = tags[idx % len(tags)]
             distractor_counts[tag] += 1
     return attempts, dict(distractor_counts), dict(mastery_by_topic), mastery_all
@@ -368,6 +405,7 @@ def _get_replay_engine() -> ScienceBKT:
     if _replay_engine_cache is None:
         _replay_engine_cache = ScienceBKT(data_path="synthetic_logs.csv")
         _replay_engine_cache.initialize_skills()
+        _replay_engine_cache.preload_calibrated_skill_params()
     return _replay_engine_cache
 
 

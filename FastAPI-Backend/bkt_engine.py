@@ -92,7 +92,7 @@ class ScienceBKT:
 
         # Core pyBKT model used repeatedly for per-skill fitting.
         self.model = Model(seed=seed, num_fits=num_fits)
-        # Mapping of Grade-6 topic IDs used by this engine.
+        # Mapping of Grade 6–9 topic IDs used by this engine.
         self.skill_map = {}
         # Cached per-skill parameters (prior/learn/guess/slip/forget).
         self.skill_params = {}
@@ -143,18 +143,17 @@ class ScienceBKT:
 
     def initialize_skills(self) -> dict[str, str]:
         """
-        Build the skill map from Grade-6 topic IDs present in the logs.
+        Build the skill map from Grade 6–9 topic IDs present in the logs.
 
-        In this dataset, Grade 6 IDs are expected to look like: G6_...
+        In this dataset, topic IDs are expected to look like: G6_..., G7_..., etc.
         """
         unique_skills = sorted(self.logs_df["skill_name"].dropna().astype(str).unique())
 
-        # Grade 6 topic IDs in this dataset follow IDs like G6_...
-        grade6_skills = [s for s in unique_skills if re.match(r"^G6[_-]", s)]
-        if not grade6_skills:
-            raise ValueError("No Grade 6 Topic IDs found in the dataset.")
+        curriculum_skills = [s for s in unique_skills if re.match(r"^G[6-9][_-]", s)]
+        if not curriculum_skills:
+            raise ValueError("No Grade 6–9 topic IDs found in the dataset.")
 
-        self.skill_map = {topic_id: topic_id for topic_id in grade6_skills}
+        self.skill_map = {topic_id: topic_id for topic_id in curriculum_skills}
         return self.skill_map
 
     def train_model(self) -> dict[str, dict[str, float]]:
@@ -369,7 +368,7 @@ class ScienceBKT:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
             self.model.fit(data=skill_df, defaults=self.defaults, num_fits=12)
-        pred_df = self.model.predict(data=skill_df)
+            pred_df = self.model.predict(data=skill_df)
         y_pred = pred_df["correct_predictions"].to_numpy(dtype=float)
         valid = np.isfinite(y_pred)
         if (not self._pybkt_prior_is_valid(skill_name)) or (
@@ -378,6 +377,31 @@ class ScienceBKT:
             self.skill_params[skill_name] = self._calibrate_bkt_params(skill_df)
         else:
             self.skill_params[skill_name] = self._extract_skill_params(skill_name, skill_df)
+
+    def preload_calibrated_skill_params(self, *, trials: int = 8) -> int:
+        """
+        Pre-compute per-skill BKT parameters for dashboard replay (fast path).
+
+        Skips pyBKT EM (which often warns or collapses on synthetic slices) and uses
+        a lighter sequential calibration. Safe for ``predict_update`` replay workloads.
+        """
+        loaded = 0
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            for skill_name in self.skill_map:
+                if skill_name in self.skill_params:
+                    continue
+                skill_df = self.logs_df[self.logs_df["skill_name"] == skill_name].copy()
+                if skill_df.empty:
+                    continue
+                skill_df = skill_df.sort_values(["user_id", "order_id"]).reset_index(drop=True)
+                skill_df["order_id"] = skill_df.groupby("user_id").cumcount() + 1
+                self.skill_params[skill_name] = self._calibrate_bkt_params(
+                    skill_df,
+                    trials=max(4, int(trials)),
+                )
+                loaded += 1
+        return loaded
 
     @staticmethod
     def _apply_bkt_observation(prior_mastery: float, p: dict[str, float], is_correct: int) -> float:

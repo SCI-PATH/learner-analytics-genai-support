@@ -12,6 +12,9 @@ Classroom Mastery Heatmap:
 
 from __future__ import annotations
 
+import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -21,7 +24,10 @@ import streamlit as st
 
 
 DEFAULT_API_BASE = "http://127.0.0.1:8000"
-DEFAULT_API_TIMEOUT_S = 90.0
+DEFAULT_API_TIMEOUT_S = 180.0
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SKILL_HIERARCHY_XLSX = PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9.xlsx"
+_TOPIC_ID_RE = re.compile(r"^G[6-9]_", re.IGNORECASE)
 
 DEFAULT_STUDENTS = [
     "user_001",
@@ -31,26 +37,47 @@ DEFAULT_STUDENTS = [
     "user_005",
 ]
 
-DEFAULT_TOPICS = [
-    "G6_S1_ORG_CHARS",
-    "G6_S1_ORG_CLASS",
-    "G6_S2_MAT_PROPS",
-    "G6_S2_MAT_STATES",
-    "G6_S4_ENE_SOURCES",
-    "G6_S8_ELE_CIRCUITS",
-    "G6_S8_ELE_CONDINS",
-]
+
+@lru_cache(maxsize=1)
+def _load_skill_hierarchy() -> tuple[tuple[str, ...], dict[str, str]]:
+    """Load topic IDs and display labels from the merged G6–G9 skill hierarchy."""
+    fallback_topics = (
+        "G6_S1_ORG_CHARS",
+        "G6_S1_ORG_CLASS",
+        "G6_S2_MAT_PROPS",
+        "G6_S2_MAT_STATES",
+        "G6_S4_ENE_SOURCES",
+        "G6_S8_ELE_CIRCUITS",
+        "G6_S8_ELE_CONDINS",
+    )
+    fallback_labels = {tid: tid for tid in fallback_topics}
+    if not SKILL_HIERARCHY_XLSX.is_file():
+        return fallback_topics, fallback_labels
+
+    df = pd.read_excel(SKILL_HIERARCHY_XLSX, sheet_name=0)
+    topic_col = "Topic ID (Mocked for Assessment Module)"
+    ref_col = "Curriculum Reference"
+    if topic_col not in df.columns:
+        return fallback_topics, fallback_labels
+
+    topics: list[str] = []
+    labels: dict[str, str] = {}
+    for _, row in df.iterrows():
+        tid = str(row.get(topic_col) or "").strip()
+        if not tid or not _TOPIC_ID_RE.match(tid):
+            continue
+        topics.append(tid)
+        ref = str(row.get(ref_col) or "").strip() if ref_col in df.columns else ""
+        labels[tid] = ref if ref else tid
+
+    unique_topics = list(dict.fromkeys(topics))
+    if not unique_topics:
+        return fallback_topics, fallback_labels
+    return tuple(unique_topics), labels
 
 
-TOPIC_LABELS = {
-    "G6_S1_ORG_CHARS": "Organisms: Characteristics",
-    "G6_S1_ORG_CLASS": "Organisms: Classification",
-    "G6_S2_MAT_PROPS": "Materials: Properties",
-    "G6_S2_MAT_STATES": "Materials: States of Matter",
-    "G6_S4_ENE_SOURCES": "Energy: Sources",
-    "G6_S8_ELE_CIRCUITS": "Electricity: Circuits",
-    "G6_S8_ELE_CONDINS": "Electricity: Conductors vs Insulators",
-}
+DEFAULT_TOPICS: list[str] = list(_load_skill_hierarchy()[0])
+TOPIC_LABELS: dict[str, str] = dict(_load_skill_hierarchy()[1])
 
 
 def fetch_mastery_matrix(
@@ -337,7 +364,10 @@ def main() -> None:
     should_reload = bool(run) or st.session_state.dashboard_data is None
     if should_reload:
         try:
-            with st.spinner("Loading mastery and at-risk analytics..."):
+            with st.spinner(
+                "Loading mastery and at-risk analytics… "
+                "(first load with 57 topics in replay_logs mode can take 1–2 minutes)"
+            ):
                 payload = fetch_mastery_matrix(
                     api_base,
                     student_ids,

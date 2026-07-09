@@ -425,6 +425,13 @@ class TutorHintRequest(BaseModel):
         description="Earlier chat turns oldest→newest; omit the latest student line (it's student_answer)",
     )
     context_k: int = Field(4, ge=1, le=10, description="Number of retrieved textbook chunks")
+    persona_id: Optional[str] = Field(
+        None,
+        description=(
+            "Tutor persona: practical_encourager, analytical_coach, or curious_explorer. "
+            "If omitted, server uses TUTOR_DEFAULT_PERSONA or rotates randomly per turn."
+        ),
+    )
 
 
 class TutorHintAutoTopicRequest(BaseModel):
@@ -439,6 +446,13 @@ class TutorHintAutoTopicRequest(BaseModel):
         description="Earlier turns for continuity (same semantics as TutorHintRequest)",
     )
     context_k: int = Field(4, ge=1, le=10, description="Number of retrieved textbook chunks")
+    persona_id: Optional[str] = Field(
+        None,
+        description=(
+            "Tutor persona: practical_encourager, analytical_coach, or curious_explorer. "
+            "If omitted, server uses TUTOR_DEFAULT_PERSONA or rotates randomly per turn."
+        ),
+    )
 
 
 class AssessmentSubmitRequest(BaseModel):
@@ -532,6 +546,7 @@ def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
         student_answer=req.student_answer,
         conversation_history=hist,
         context_k=req.context_k,
+        persona_id=req.persona_id,
     )
     if result.get("success"):
         score = result.get("interaction_score_effective")
@@ -574,6 +589,7 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
         topic_id=req.topic_id,
         conversation_history=hist,
         context_k=req.context_k,
+        persona_id=req.persona_id,
     )
     if result.get("success"):
         score = result.get("interaction_score_effective")

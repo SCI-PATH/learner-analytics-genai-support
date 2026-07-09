@@ -25,6 +25,7 @@ def _call_tutor_api(
     message: str,
     *,
     conversation_history: list[dict[str, str]] | None = None,
+    persona_id: str | None = None,
     timeout_sec: float = 60.0,
 ) -> dict[str, Any]:
     """Call auto-topic tutor endpoint; backend infers topic_id each turn."""
@@ -36,6 +37,8 @@ def _call_tutor_api(
     }
     if conversation_history:
         payload["conversation_history"] = conversation_history
+    if persona_id:
+        payload["persona_id"] = persona_id
 
     try:
         r = requests.post(url, json=payload, timeout=timeout_sec)
@@ -129,6 +132,8 @@ def main() -> None:
         st.session_state.latest_mode = None
     if "latest_topic" not in st.session_state:
         st.session_state.latest_topic = None
+    if "latest_persona" not in st.session_state:
+        st.session_state.latest_persona = None
     if "last_tutor_debug" not in st.session_state:
         st.session_state.last_tutor_debug = None
 
@@ -136,11 +141,23 @@ def main() -> None:
         st.header("Learner State")
         user_id = st.text_input("user_id", value="student_demo")
         api_base = st.text_input("API Base URL", value=DEFAULT_API_BASE)
+        persona_choice = st.selectbox(
+            "Tutor persona",
+            options=[
+                "(auto — random per turn)",
+                "practical_encourager",
+                "analytical_coach",
+                "curious_explorer",
+            ],
+            index=0,
+            help="Leave on auto for Epic 6 rotation, or pin a persona for testing.",
+        )
         if st.button("Clear chat / New conversation", use_container_width=True):
             st.session_state.messages = []
             st.session_state.latest_mastery = None
             st.session_state.latest_mode = None
             st.session_state.latest_topic = None
+            st.session_state.latest_persona = None
             st.session_state.last_tutor_debug = None
             st.rerun()
 
@@ -148,6 +165,7 @@ def main() -> None:
         mastery = st.session_state.latest_mastery
         mode = st.session_state.latest_mode
         resolved_topic = st.session_state.latest_topic
+        persona = st.session_state.latest_persona
 
         if mastery is None:
             st.info("Send a message to see mastery for the detected lesson.")
@@ -155,6 +173,8 @@ def main() -> None:
             st.metric("BKT Mastery (current lesson)", f"{float(mastery):.4f}")
             st.write(f"Detected topic: `{resolved_topic}`")
             st.write(f"Hint mode: `{mode}`")
+            if persona:
+                st.write(f"Active persona: `{persona}`")
 
         with st.expander("Developer · BKT / LLM diagnostics", expanded=False):
             st.caption(
@@ -169,6 +189,9 @@ def main() -> None:
                     st.error(str(dbg["error"]))
                 else:
                     st.write("**topic_id_resolved:** ", dbg.get("topic_id_resolved"))
+                    st.write("**persona_id:** ", dbg.get("persona_id"))
+                    st.write("**persona_label:** ", dbg.get("persona_label"))
+                    st.write("**hint_mode:** ", dbg.get("hint_mode"))
                     st.write("**topic_changed:** ", dbg.get("topic_changed"))
                     st.write("**history_turns_sent:** ", dbg.get("history_turns_sent"))
                     st.write("**Policy:** ", f"`{dbg.get('tutor_bkt_policy', 'unknown')}`")
@@ -200,11 +223,13 @@ def main() -> None:
                 {"role": str(m["role"]), "content": str(m["content"])}
                 for m in st.session_state.messages[:-1]
             ]
+            persona_id = None if persona_choice.startswith("(") else persona_choice
             response = _call_tutor_api(
                 api_base=api_base,
                 user_id=user_id.strip() or "student_demo",
                 message=user_msg,
                 conversation_history=hist or None,
+                persona_id=persona_id,
             )
 
             if not response.get("success"):
@@ -215,6 +240,11 @@ def main() -> None:
                 assistant_text = response.get("hint_text", "(No hint returned)")
                 st.session_state.latest_mastery = response.get("mastery_probability")
                 st.session_state.latest_mode = response.get("hint_mode")
+                st.session_state.latest_persona = (
+                    response.get("persona_label")
+                    or response.get("persona_id")
+                    or "unknown"
+                )
                 st.session_state.latest_topic = (
                     response.get("topic_id_resolved")
                     or response.get("topic_id")
@@ -223,6 +253,9 @@ def main() -> None:
                 st.session_state.last_tutor_debug = {
                     "success": True,
                     "topic_id_resolved": response.get("topic_id_resolved"),
+                    "persona_id": response.get("persona_id"),
+                    "persona_label": response.get("persona_label"),
+                    "hint_mode": response.get("hint_mode"),
                     "topic_changed": response.get("topic_changed"),
                     "history_turns_sent": response.get("history_turns_sent"),
                     "tutor_bkt_policy": response.get("tutor_bkt_policy"),

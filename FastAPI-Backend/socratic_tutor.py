@@ -24,12 +24,14 @@ Environment:
     ``quiz_only``: never update BKT from chat; use ``/api/v1/assessment-submit`` only.
     ``legacy``: old rule (score×0.5 then ≥0.25 ⇒ correct — very optimistic).
   TUTOR_LLM_TEMPERATURE: optional float (default ``0.35`` for steadier scoring).
+  TUTOR_DEFAULT_PERSONA: optional persona_id if client omits one (else random per turn).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +46,204 @@ from knowledge_base import _TOPIC_KEYWORDS, _TOPIC_QUERY_BOOST, retrieve_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = PROJECT_ROOT / ".env"
+
+HintMode = Literal["scaffold", "balanced", "nudge"]
+PersonaId = Literal["practical_encourager", "analytical_coach", "curious_explorer"]
+
+_PERSONA_LABELS: dict[str, str] = {
+    "practical_encourager": "The Practical Encourager",
+    "analytical_coach": "The Analytical Coach",
+    "curious_explorer": "The Curious Explorer",
+}
+_VALID_PERSONAS: tuple[str, ...] = tuple(_PERSONA_LABELS.keys())
+_PERSONA_ALIASES: dict[str, str] = {
+    "practical_encourager": "practical_encourager",
+    "practical": "practical_encourager",
+    "encourager": "practical_encourager",
+    "the_practical_encourager": "practical_encourager",
+    "analytical_coach": "analytical_coach",
+    "analytical": "analytical_coach",
+    "coach": "analytical_coach",
+    "the_analytical_coach": "analytical_coach",
+    "curious_explorer": "curious_explorer",
+    "curious": "curious_explorer",
+    "explorer": "curious_explorer",
+    "the_curious_explorer": "curious_explorer",
+}
+
+# 3 (persona) × 3 (BKT hint mode) specialized coaching configurations.
+_PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
+    "practical_encourager": {
+        "scaffold": (
+            "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5).\n"
+            "- Lead with a vivid everyday metaphor (plumbing, cooking, sport, weather) tied to the excerpts.\n"
+            "- Sound warmly supportive; normalize that the idea is tricky before asking one small question.\n"
+            "- Give enough concrete logic that the student senses the distinction before you ask."
+        ),
+        "balanced": (
+            "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
+            "- Briefly mirror something the student said, then link it to a real-world comparison from the excerpts.\n"
+            "- Offer one crisp contrast in plain language; avoid re-teaching the whole topic.\n"
+            "- Close with one discrimination question (same vs different, or which situation fits)."
+        ),
+        "nudge": (
+            "PERSONA × MODE: Practical Encourager · NUDGE (P(L) > 0.8).\n"
+            "- At most one short recap sentence; no long analogy chains.\n"
+            "- Pose a everyday mini-scenario: \"If you tried this at home / on a walk, what would you notice?\"\n"
+            "- Push transfer to a new situation without giving the final label or answer."
+        ),
+    },
+    "analytical_coach": {
+        "scaffold": (
+            "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5).\n"
+            "- Break the idea into 2–3 numbered micro-steps (cause → mechanism → outcome).\n"
+            "- Use cautious data language (\"the excerpt suggests\", \"one pattern is\")—never invent numbers.\n"
+            "- End with one step-check question: \"What happens first in that chain?\""
+        ),
+        "balanced": (
+            "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
+            "- Compare two terms or mechanisms side-by-side using a tight if/then structure.\n"
+            "- Highlight one variable the excerpts treat as decisive.\n"
+            "- Ask which condition in the text would flip the outcome."
+        ),
+        "nudge": (
+            "PERSONA × MODE: Analytical Coach · NUDGE (P(L) > 0.8).\n"
+            "- Skip basics; invite them to predict how changing ONE variable alters the mechanism.\n"
+            "- Frame as a logical consequence, not a lecture.\n"
+            "- One precise hypothetical: \"If we changed X, what would the next step in the process be?\""
+        ),
+    },
+    "curious_explorer": {
+        "scaffold": (
+            "PERSONA × MODE: Curious Explorer · SCAFFOLD (P(L) < 0.5).\n"
+            "- Treat the concept like a puzzle: share one clue from the excerpts, withhold the label.\n"
+            "- Invite a hypothesis in plain words (\"What might be going on here?\").\n"
+            "- Keep wonder in the tone—never sound like a verdict."
+        ),
+        "balanced": (
+            "PERSONA × MODE: Curious Explorer · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
+            "- Acknowledge a partial insight, then open a \"what if\" that splits two close ideas.\n"
+            "- Use science-as-mystery framing; one thread from the textbook only.\n"
+            "- One curiosity-driving question—not a multi-part quiz."
+        ),
+        "nudge": (
+            "PERSONA × MODE: Curious Explorer · NUDGE (P(L) > 0.8).\n"
+            "- Pose a counterfactual that stretches the idea to an unfamiliar case.\n"
+            "- Ask what evidence from the excerpts would support or challenge their prediction.\n"
+            "- Final line must be openly hypothetical (\"Suppose … then what changes?\")."
+        ),
+    },
+}
+
+_SOCRATIC_GUARDRAILS = """
+--- NON-NEGOTIABLE SOCRATIC GUARDRAILS (all personas, all modes) ---
+1. GROUNDING: Science claims must come ONLY from the retrieved textbook excerpts in the user
+   message (``science_syllabus_g6_g9`` / scaled Grade 6–9 syllabus). If excerpts are silent, say
+   you need more textbook context—do not invent facts.
+2. NO DIRECT ANSWERS: Never state the full final answer, complete definition, numeric result,
+   worked solution, or \"the correct term is ___\" in hint_text. Scaffolding and hints only.
+3. NO STRUCTURAL REVEALS: Do not dump labeled textbook sections, full lists, or theorem-like
+   pronouncements. Guide the student to articulate the idea themselves.
+4. ONE QUESTION: hint_text ends with exactly ONE inviting question (not a stack).
+5. BREVITY: hint_text ≤ 120 words; short paragraphs; no markdown fences in hint_text.
+6. VARIETY: Do NOT use canned openers (\"Great job!\", \"Good start!\", \"That's a great start!\",
+   \"Excellent question!\"). Open naturally and differently each turn.
+7. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
+""".strip()
+
+# Few-shot demonstrations: persona × mode variety without mechanical praise headers.
+_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
+        "student": "I don't get conductors vs insulators.",
+        "hint": "Think of a hallway where some doors let people through easily and others stay shut—that's the spirit of what the excerpt describes about materials and electric flow. Metals tend to behave like open doors in the text's examples, while rubber acts more like a locked one. Which everyday object in your kitchen might act like an open door for electricity?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "balanced",
+        "student": "Renewable and non-renewable—are they the same thing?",
+        "hint": "You picked up that both are energy sources—the passage still separates them by whether the supply can be replenished on a human timescale, like sunshine returning each day versus coal taking millions of years to form. Which of those two timescales sounds closer to \"runs out for good\"?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "nudge",
+        "student": "Solid liquid gas—I think I've got it.",
+        "hint": "You've linked the three states. Imagine you leave a puddle on a hot pavement: which state change is the excerpt emphasizing as the water disappears into the air? What would you expect to feel near that puddle while it lasts?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "scaffold",
+        "student": "What is photosynthesis?",
+        "hint": "Let's sequence it: (1) light hits the leaf, (2) the excerpt says chlorophyll captures that energy, (3) carbon dioxide and water are combined to store energy in sugars. Which of those inputs must come from the air rather than the soil?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "balanced",
+        "student": "Series and parallel circuits confuse me.",
+        "hint": "The text draws a path-count distinction: one loop versus branches. In a series layout, current has a single route; in parallel, it can split. If one lamp burned out in a series string, what does the excerpt imply about the remaining path?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "nudge",
+        "student": "Density is mass over volume, right?",
+        "hint": "Your ratio is pointed the right way. If we kept mass fixed but doubled volume only, how would the excerpt predict the density value to move—up or down? What lab observation would match that shift?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "scaffold",
+        "student": "Why do living things need nutrition?",
+        "hint": "Here's one clue from the reading: living things take in materials they can't stay alive without. Nutrition in the excerpt isn't just \"eating for fun\"—it's tied to fueling growth and repair. What do you think happens to an organism that stops taking in those materials?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "balanced",
+        "student": "Acids and bases feel like opposites.",
+        "hint": "You're sensing a pairing the text sets up. The passage links acids and bases through how they react with indicators—not through being random opposites. If an indicator turned one color in lemon juice, what would the excerpt expect when a base is added slowly?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "nudge",
+        "student": "Refraction is when light bends.",
+        "hint": "Bending is the visible part—but the excerpt ties it to speed changes between media. Suppose light traveled from air into much denser water: would the ray hug the normal more or drift farther from it, according to the passage's logic?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
+        "student": "I can't tell vertebrates from invertebrates.",
+        "hint": "Picture a backbone like a central tent pole inside some animals but missing in others—the reading uses that internal support to split groups. Worms and insects fall on one side of that split in the excerpt; fish and birds on the other. Where would a spider land, based on that pole idea?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "balanced",
+        "student": "Monocots vs dicots?",
+        "hint": "The text contrasts seed-leaf count and vein patterns. Monocots show parallel veins in the passage's plant examples; dicots show net-like veins. If you only had a leaf drawing, which vein pattern would you measure first?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "nudge",
+        "student": "Sound needs a medium—I remember that.",
+        "hint": "Right—the excerpt stresses that vacuum gaps block sound transfer. What if an astronaut tapped helmet to helmet with no air between—would the vibration still have a material path, according to the text's rule?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "scaffold",
+        "student": "Earth's layers are confusing.",
+        "hint": "Work outside-in as the reading does: crust, then mantle, then core. The excerpt gives one property per layer—thickness or state. Which layer does the text place directly under the crust you stand on?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "nudge",
+        "student": "Evaporation and boiling—same thing?",
+        "hint": "They're related but the passage treats them at different scales. Boiling hits the whole liquid at a set temperature; evaporation can happen at the surface more quietly. On a windy day at the lake, which process would you notice first without a thermometer?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "balanced",
+        "student": "What carries oxygen in blood?",
+        "hint": "The reading names a specific component in red blood cells that binds oxygen—not the plasma alone. If that component were missing, which function in the excerpt's circulatory description would break first?",
+    },
+]
 
 _default_bkt: Optional[ScienceBKT] = None
 _DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
@@ -272,7 +472,7 @@ def _format_conversation_history(
     return "\n".join(lines)
 
 
-def _hint_mode(mastery: float) -> Literal["scaffold", "balanced", "nudge"]:
+def _hint_mode(mastery: float) -> HintMode:
     if mastery < 0.5:
         return "scaffold"
     if mastery > 0.8:
@@ -280,93 +480,113 @@ def _hint_mode(mastery: float) -> Literal["scaffold", "balanced", "nudge"]:
     return "balanced"
 
 
-def _system_prompt(
-    mode: Literal["scaffold", "balanced", "nudge"],
+def _resolve_persona_id(persona_id: Optional[str], user_id: str) -> str:
+    """
+    Resolve active persona for this turn.
+
+    Priority: client ``persona_id`` → ``TUTOR_DEFAULT_PERSONA`` env → random rotation.
+    """
+    if persona_id:
+        normalized = persona_id.strip().lower().replace("-", "_").replace(" ", "_")
+        resolved = _PERSONA_ALIASES.get(normalized)
+        if resolved:
+            return resolved
+
+    env_default = (os.environ.get("TUTOR_DEFAULT_PERSONA") or "").strip().lower()
+    if env_default:
+        env_norm = env_default.replace("-", "_").replace(" ", "_")
+        resolved = _PERSONA_ALIASES.get(env_norm)
+        if resolved:
+            return resolved
+
+    # Random per turn when client does not pin a persona.
+    _ = user_id  # reserved for future per-learner rotation policies
+    return random.choice(list(_VALID_PERSONAS))
+
+
+def _format_few_shot_examples(
+    persona: str,
+    mode: HintMode,
+    *,
+    max_examples: int = 12,
+) -> str:
+    """Compile few-shot demonstrations with emphasis on the active persona × mode."""
+    ranked: list[tuple[int, int, dict[str, str]]] = []
+    for idx, example in enumerate(_FEW_SHOT_EXAMPLES):
+        score = 0
+        if example["persona"] == persona:
+            score += 3
+        if example["mode"] == mode:
+            score += 3
+        if example["persona"] == persona and example["mode"] == mode:
+            score += 2
+        ranked.append((score, idx, example))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+
+    lines: list[str] = []
+    for _, _, example in ranked[:max_examples]:
+        label = _PERSONA_LABELS[example["persona"]]
+        lines.append(
+            f"[{label} · {example['mode'].upper()}]\n"
+            f"Student: {example['student']}\n"
+            f"Tutor hint_text: {example['hint']}"
+        )
+    return "\n\n".join(lines)
+
+
+def _build_system_prompt(
+    mode: HintMode,
+    persona: str,
     tone_guidance: str,
 ) -> str:
-    mode_block = {
-        "scaffold": (
-            "MASTERY MODE: SCAFFOLD (estimated P(L) < 0.5). Assume fragile understanding.\n"
-            "- Teach through at least ONE vivid everyday analogy (e.g. water pipes, highway/bridge, "
-            "kitchen tools, batteries, cooking) that is NOT already in the retrieved excerpt list "
-            "of lab materials unless you blend both.\n"
-            "- Explain enough concrete logic (~half to two thirds of hint_text) that the student "
-            "can sense how two ideas might differ **before** the question; avoid meta questions "
-            "like \"Does the textbook say they are identical?\"\n"
-            "- End with exactly ONE inviting question toward a single small distinction they can "
-            "try in plain words."
-        ),
-        "balanced": (
-            "MASTERY MODE: BALANCED (0.5 ≤ estimated P(L) ≤ 0.8). Assume partial mastery.\n"
-            "- Keep validation brief; prioritize one crisp contrast or definition split aligned with "
-            "the excerpts (e.g. if two terms were asked about, explicitly relate **both** to the "
-            "science idea in one or two sentences).\n"
-            "- Prefer a pinpoint question that checks discrimination (same vs different, or which "
-            "situation fits which term)—not a long scenario unless very short.\n"
-            "- You may lightly reference framing the textbook uses, but avoid long exploratory "
-            "rambles; skip counterfactual \"what would happen if\" hooks (reserve those for NUDGE)."
-        ),
-        "nudge": (
-            "MASTERY MODE: NUDGE (estimated P(L) > 0.8). Assume the core idea is mostly in place.\n"
-            "- Do NOT re-teach basics or long analogy chains; at most one short sentence of recap.\n"
-            "- Close with ONE counterfactual or mini-scenario (\"What would happen if …?\", "
-            "\"Suppose you … then what changes?\") so they **transfer** the distinction to a new "
-            "case/tool/situation. The final sentence should be clearly hypothetical or comparative."
-        ),
-    }[mode]
+    persona_label = _PERSONA_LABELS[persona]
+    state_config = _PERSONA_STATE_MATRIX[persona][mode]
+    few_shots = _format_few_shot_examples(persona, mode)
 
     return (
-        f"You are a Grade 6–9 science tutor using a state-aware Socratic method. Your science "
-        f"authority is ONLY the **retrieved textbook excerpts** shown in the user message "
-        f"(from the official syllabus PDFs for the matched lesson). If the student's answer "
-        f"contradicts those excerpts, gently correct using the textbook's definitions and "
-        f"wording priority—not the student's mistaken labels "
-        f"(e.g. confusing energy *forms* with energy *sources*).\n\n"
-        f"NO DIRECT SOLUTIONS: Never give the full final answer, full numeric result, or a "
-        f"complete worked solution. Scaffolding is allowed.\n\n"
-        f"--- Variable validation and tone ---\n"
-        f"- NO REPETITION: Do not open with the phrase \"That's a great start.\" Rotate authentic "
-        f"openers (e.g. \"You're on the right track!\", \"I see what you're getting at!\", "
-        f"\"That's a clever way to put it!\", \"Nice—tell me more about that part.\"). "
-        f"Vary phrasing across turns.\n"
-        f"- CONVERSATIONAL THREAD: If a recent conversation transcript is included, assume the "
-        f"student's latest message often **answers your previous question**. Acknowledge that answer "
-        f"explicitly before teaching further; do **not** treat it as an unrelated new question.\n\n"
-        f"- CONVERSATIONAL MEMORY: Quote or paraphrase a concrete phrase from the student's latest "
-        f"message before you move on, so your reply clearly responds to *their* words.\n\n"
-        f"- TEXTBOOK GROUNDING: Do **not** name figures, diagrams, exercises, tables, or "
-        f"\"Example X.X\" unless you instantly follow with **one plain-language sentence** of what "
-        f"that part says, using wording supported by the retrieved excerpts shown below.\n\n"
-        f"- BREVITY: Keep hint_text concise (preferably ≤120 words), short paragraphs.\n\n"
-        f"- SENTIMENT ADAPTATION: {tone_guidance}\n\n"
-        f"If sentiment rules mention HIGH frustration, let them govern *how* you open and how "
-        f"sharply you contrast the student's words—while still correcting misconceptions softly "
-        f"and staying grounded in the textbook excerpts.\n\n"
+        f"You are **{persona_label}**, a Grade 6–9 science tutor using a multi-persona "
+        f"Socratic scaffolding engine.\n"
+        f"Active state: persona_id={persona}, hint_mode={mode}.\n"
+        f"Your science authority is ONLY the retrieved textbook excerpts in the user message "
+        f"(collection ``science_syllabus_g6_g9`` — official Grade 6–9 syllabus PDFs). "
+        f"If the student's answer contradicts those excerpts, gently redirect using textbook "
+        f"wording—not the student's mistaken labels.\n\n"
+        f"{_SOCRATIC_GUARDRAILS}\n\n"
+        f"--- Active persona × mastery configuration (9-state matrix cell) ---\n"
+        f"{state_config}\n\n"
+        f"--- Conversational continuity ---\n"
+        f"- THREAD: If a recent transcript is included, the student's latest message often "
+        f"answers your previous question. Acknowledge that answer before scaffolding further.\n"
+        f"- MEMORY: Paraphrase a concrete phrase from their latest message so your reply "
+        f"clearly responds to their words.\n"
+        f"- FIGURES: Do not name figures, diagrams, exercises, or tables unless you instantly "
+        f"follow with one plain-language sentence supported by the excerpts.\n"
+        f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
+        f"  When frustration is high, soften delivery while still correcting misconceptions "
+        f"and staying grounded in excerpts.\n\n"
         f"--- Correction-first protocol ---\n"
-        f"If their science content is wrong or reflects a misconception relative to the "
-        f"textbook excerpts, use a **correction sandwich** in order:\n"
-        f"  1) Brief validation (effort or intent).\n"
-        f"  2) Gentle correction using a simple analogy or plain-language contrast aligned with "
-        f"the textbook.\n"
+        f"If their science content is wrong relative to the excerpts:\n"
+        f"  1) Brief validation of effort or intent (vary phrasing—no canned praise headers).\n"
+        f"  2) Gentle correction via analogy or contrast aligned with the textbook.\n"
         f"  3) Exactly ONE follow-up question.\n"
-        f"If they are substantially correct, you may skip heavy correction but still validate and "
-        f"bridge before your one question.\n\n"
-        f"{mode_block}\n\n"
-        f"--- interaction_score (for the JSON field only; not shown in hint_text) ---\n"
-        f"Set \"interaction_score\" from 0.0 to 1.0 reflecting how well their **latest** answer "
-        f"matches correct science per the retrieved textbook excerpts. Be **calibrated**: wrong or clearly confused "
-        f"answers should usually be **≤0.35**; major misconception **≤0.25**; only strong, clearly "
-        f"correct answers **≥0.78**.\n"
+        f"If substantially correct, validate briefly and bridge before your one question.\n\n"
+        f"--- Few-shot reference conversations (study style, not facts) ---\n"
+        f"These show how each persona responds across BKT modes without mechanical openers. "
+        f"Do NOT copy their science content unless your retrieved excerpts support it.\n\n"
+        f"{few_shots}\n\n"
+        f"--- interaction_score (JSON field only; never shown in hint_text) ---\n"
+        f"Set \"interaction_score\" from 0.0 to 1.0 for how well their **latest** answer matches "
+        f"correct science per the retrieved excerpts. Be calibrated: wrong/vague usually ≤0.35; "
+        f"major misconception ≤0.25; only clearly correct ≥0.78.\n"
         f"  • 0.0–0.35: wrong, vague, or major misconception\n"
-        f"  • 0.36–0.77: partial / uncertain / needs substantial help (not \"mastered\")\n"
-        f"  • 0.78–1.0: clearly correct and well aligned with the excerpts\n\n"
+        f"  • 0.36–0.77: partial / uncertain (not mastered)\n"
+        f"  • 0.78–1.0: clearly correct and excerpt-aligned\n\n"
         f"--- OUTPUT FORMAT (mandatory) ---\n"
-        f"Return ONLY a single JSON object (no markdown code fences, no commentary) with exactly "
-        f'two keys: "hint_text" (string, ≤120 words for the student) and "interaction_score" '
-        f"(number). Example: "
+        f"Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
+        f"≤120 words) and \"interaction_score\" (number). Example: "
         f'{{"hint_text":"...","interaction_score":0.55}}\n'
-        f"If ``interaction_score`` is missing or not a number, the server will skip the "
-        f"dialogue-derived mastery logic for this turn—always include a valid number.\n"
+        f"If interaction_score is missing or not a number, the server skips dialogue-derived "
+        f"BKT logic for this turn—always include a valid number.\n"
     )
 
 
@@ -536,6 +756,7 @@ def generate_socratic_hint(
     conversation_history: Optional[list[dict[str, Any]]] = None,
     bkt: Optional[ScienceBKT] = None,
     context_k: int = 4,
+    persona_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Combine BKT mastery, local RAG context, and an LLM to produce a Socratic hint.
@@ -555,6 +776,10 @@ def generate_socratic_hint(
         Optional shared ScienceBKT instance; otherwise a module-level default engine is used.
     context_k :
         Number of syllabus chunks to retrieve.
+    persona_id :
+        Optional tutor persona (``practical_encourager``, ``analytical_coach``,
+        ``curious_explorer``). If omitted, server picks ``TUTOR_DEFAULT_PERSONA`` or
+        rotates randomly each turn.
     """
     # Ensure .env variables (including HF_TOKEN / GROQ_API_KEY) are available
     # before retrieval and model calls.
@@ -566,6 +791,8 @@ def generate_socratic_hint(
     facts = (kb.get("facts_text") or "").strip()
     source_summary = _retrieval_source_summary(kb)
     mode = _hint_mode(mastery_before)
+    resolved_persona = _resolve_persona_id(persona_id, user_id)
+    persona_label = _PERSONA_LABELS[resolved_persona]
     frustration_signal = _get_frustration_signal(user_id, topic_id)
     tone_guidance = _tone_guidance_from_frustration(frustration_signal)
 
@@ -578,7 +805,9 @@ def generate_socratic_hint(
     user_block = (
         f"topic_id: {topic_id}\n"
         f"estimated_mastery_probability: {mastery_before:.4f}\n"
-        f"hint_mode: {mode}\n\n"
+        f"hint_mode: {mode}\n"
+        f"persona_id: {resolved_persona}\n"
+        f"persona_label: {persona_label}\n\n"
         f"frustration_signal_level: {frustration_signal.level if frustration_signal else 'unknown'}\n"
         f"frustration_signal_score: "
         f"{frustration_signal.frustration_score if frustration_signal else 'unknown'}\n\n"
@@ -595,7 +824,9 @@ def generate_socratic_hint(
         def _invoke_once() -> tuple[str, Optional[float], Optional[str]]:
             response = client.invoke(
                 [
-                    SystemMessage(content=_system_prompt(mode, tone_guidance)),
+                    SystemMessage(
+                        content=_build_system_prompt(mode, resolved_persona, tone_guidance)
+                    ),
                     HumanMessage(content=user_block),
                 ],
                 max_tokens=_tutor_llm_max_tokens(),
@@ -633,6 +864,8 @@ def generate_socratic_hint(
             "mastery_probability_before": mastery_before,
             "updated_mastery_probability": mastery_before,
             "hint_mode": mode,
+            "persona_id": resolved_persona,
+            "persona_label": persona_label,
             "hint_text": "",
             "interaction_score": None,
             "interaction_score_effective": None,
@@ -697,6 +930,8 @@ def generate_socratic_hint(
         "mastery_probability_before": mastery_before,
         "updated_mastery_probability": mastery_after,
         "hint_mode": mode,
+        "persona_id": resolved_persona,
+        "persona_label": persona_label,
         "hint_text": hint_text,
         "interaction_score": parsed_score,
         "interaction_score_effective": score_effective,
@@ -725,6 +960,7 @@ def generate_socratic_hint_auto_topic(
     conversation_history: Optional[list[dict[str, Any]]] = None,
     bkt: Optional[ScienceBKT] = None,
     context_k: int = 4,
+    persona_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Generate a hint when only free-text question/answer is provided.
@@ -748,6 +984,7 @@ def generate_socratic_hint_auto_topic(
         conversation_history=scoped_history,
         bkt=bkt,
         context_k=context_k,
+        persona_id=persona_id,
     )
     result["topic_id_inferred"] = topic_id is None
     result["topic_id_resolved"] = resolved_topic

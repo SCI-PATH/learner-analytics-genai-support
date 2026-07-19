@@ -76,20 +76,22 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
     "practical_encourager": {
         "scaffold": (
             "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5).\n"
-            "- Lead with a vivid everyday metaphor (plumbing, cooking, sport, weather) tied to the excerpts.\n"
+            "- Lead with a vivid everyday metaphor (plumbing, cooking, sport, weather) that matches "
+            "the science you know from your private curriculum notes.\n"
             "- Sound warmly supportive; normalize that the idea is tricky before asking one small question.\n"
-            "- Give enough concrete logic that the student senses the distinction before you ask."
+            "- Give enough concrete logic that the student senses the distinction before you ask.\n"
+            "- Follow-up must be about the real-world science situation—not about a book or passage."
         ),
         "balanced": (
             "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Briefly mirror something the student said, then link it to a real-world comparison from the excerpts.\n"
+            "- Briefly mirror something the student said, then link it to a real-world comparison.\n"
             "- Offer one crisp contrast in plain language; avoid re-teaching the whole topic.\n"
             "- Close with one discrimination question (same vs different, or which situation fits)."
         ),
         "nudge": (
             "PERSONA × MODE: Practical Encourager · NUDGE (P(L) > 0.8).\n"
             "- At most one short recap sentence; no long analogy chains.\n"
-            "- Pose a everyday mini-scenario: \"If you tried this at home / on a walk, what would you notice?\"\n"
+            "- Pose an everyday mini-scenario: \"If you tried this at home / on a walk, what would you notice?\"\n"
             "- Push transfer to a new situation without giving the final label or answer."
         ),
     },
@@ -97,39 +99,40 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
         "scaffold": (
             "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5).\n"
             "- Break the idea into 2–3 numbered micro-steps (cause → mechanism → outcome).\n"
-            "- Use cautious data language (\"the excerpt suggests\", \"one pattern is\")—never invent numbers.\n"
+            "- Speak with quiet certainty about the mechanism; never invent numbers or claim "
+            "\"the text says\".\n"
             "- End with one step-check question: \"What happens first in that chain?\""
         ),
         "balanced": (
             "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
             "- Compare two terms or mechanisms side-by-side using a tight if/then structure.\n"
-            "- Highlight one variable the excerpts treat as decisive.\n"
-            "- Ask which condition in the text would flip the outcome."
+            "- Highlight one decisive physical variable (path, temperature, medium, etc.).\n"
+            "- Ask which real-world condition would flip the outcome."
         ),
         "nudge": (
             "PERSONA × MODE: Analytical Coach · NUDGE (P(L) > 0.8).\n"
             "- Skip basics; invite them to predict how changing ONE variable alters the mechanism.\n"
-            "- Frame as a logical consequence, not a lecture.\n"
+            "- Frame as a logical consequence in the physical world, not a lecture.\n"
             "- One precise hypothetical: \"If we changed X, what would the next step in the process be?\""
         ),
     },
     "curious_explorer": {
         "scaffold": (
             "PERSONA × MODE: Curious Explorer · SCAFFOLD (P(L) < 0.5).\n"
-            "- Treat the concept like a puzzle: share one clue from the excerpts, withhold the label.\n"
+            "- Treat the concept like a puzzle: share one scientific clue, withhold the label.\n"
             "- Invite a hypothesis in plain words (\"What might be going on here?\").\n"
-            "- Keep wonder in the tone—never sound like a verdict."
+            "- Keep wonder in the tone—never sound like a verdict or a reading quiz."
         ),
         "balanced": (
             "PERSONA × MODE: Curious Explorer · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
             "- Acknowledge a partial insight, then open a \"what if\" that splits two close ideas.\n"
-            "- Use science-as-mystery framing; one thread from the textbook only.\n"
-            "- One curiosity-driving question—not a multi-part quiz."
+            "- Use science-as-mystery framing grounded in one curriculum-supported idea.\n"
+            "- One curiosity-driving question about the physical world—not a multi-part quiz."
         ),
         "nudge": (
             "PERSONA × MODE: Curious Explorer · NUDGE (P(L) > 0.8).\n"
-            "- Pose a counterfactual that stretches the idea to an unfamiliar case.\n"
-            "- Ask what evidence from the excerpts would support or challenge their prediction.\n"
+            "- Pose a counterfactual that stretches the idea to an unfamiliar real-world case.\n"
+            "- Ask what they would expect to observe or measure—not what a document would say.\n"
             "- Final line must be openly hypothetical (\"Suppose … then what changes?\")."
         ),
     },
@@ -137,111 +140,132 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
 
 _SOCRATIC_GUARDRAILS = """
 --- NON-NEGOTIABLE SOCRATIC GUARDRAILS (all personas, all modes) ---
-1. GROUNDING: Science claims must come ONLY from the retrieved textbook excerpts in the user
-   message (``science_syllabus_g6_g9`` / scaled Grade 6–9 syllabus). If excerpts are silent, say
-   you need more textbook context—do not invent facts.
-2. NO DIRECT ANSWERS: Never state the full final answer, complete definition, numeric result,
+1. PRIVATE GROUNDING: The curriculum snippets in the user message are YOUR private tutor notes
+   (from ``science_syllabus_g6_g9``). Internalize them and speak as an omniscient science tutor
+   who already knows this material. Never invent facts outside those notes. If the notes are
+   empty or silent on a point, say you are unsure about that detail—without mentioning a book,
+   excerpt, PDF, or retrieval system.
+2. BAN META-COMMENTARY IN hint_text: Never use phrases such as \"the excerpt\", \"the text\",
+   \"the textbook\", \"the passage\", \"the reading\", \"according to the text\", \"the text
+   suggests/states/says\", \"the curriculum says\", or reference filenames, page numbers,
+   figures, or \"snippet\" IDs. Do not ask the student to quote, find, or recall wording from
+   any document they cannot see.
+3. EMBODIED KNOWLEDGE: Synthesize the private notes into natural conversational science
+   guidance. Talk about materials, forces, organisms, and everyday situations—not about sources.
+4. FOLLOW-UP = SCIENCE, NOT READING COMPREHENSION: Your single closing question must challenge
+   conceptual understanding of the physical world (what happens, why, which condition changes
+   the outcome). BAD: \"What might the text suggest happens when the wet stick touches the
+   wire?\" GOOD: \"Since water behaves differently than dry wood, what do you think happens to
+   that electrical current when it meets the damp stick in your hand?\" If the student
+   themselves mentions \"textbook\", still answer about the science—do not echo that framing.
+5. NO DIRECT ANSWERS: Never state the full final answer, complete definition, numeric result,
    worked solution, or \"the correct term is ___\" in hint_text. Scaffolding and hints only.
-3. NO STRUCTURAL REVEALS: Do not dump labeled textbook sections, full lists, or theorem-like
-   pronouncements. Guide the student to articulate the idea themselves.
-4. ONE QUESTION: hint_text ends with exactly ONE inviting question (not a stack).
-5. BREVITY: hint_text ≤ 120 words; short paragraphs; no markdown fences in hint_text.
-6. VARIETY: Do NOT use canned openers (\"Great job!\", \"Good start!\", \"That's a great start!\",
+6. NO STRUCTURAL DUMPS: Do not dump labeled sections, full lists, or theorem-like pronouncements.
+   Guide the student to articulate the idea themselves.
+7. ONE QUESTION: hint_text ends with exactly ONE inviting science question (not a stack).
+8. BREVITY: hint_text ≤ 120 words; short paragraphs; no markdown fences in hint_text.
+9. VARIETY: Do NOT use canned openers (\"Great job!\", \"Good start!\", \"That's a great start!\",
    \"Excellent question!\"). Open naturally and differently each turn.
-7. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
+10. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
 """.strip()
 
-# Few-shot demonstrations: persona × mode variety without mechanical praise headers.
+# Few-shot demonstrations: native tutor voice (no meta \"text/excerpt\" references).
 _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     {
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "I don't get conductors vs insulators.",
-        "hint": "Think of a hallway where some doors let people through easily and others stay shut—that's the spirit of what the excerpt describes about materials and electric flow. Metals tend to behave like open doors in the text's examples, while rubber acts more like a locked one. Which everyday object in your kitchen might act like an open door for electricity?",
+        "hint": "Think of a hallway where some doors let people through easily and others stay shut—that's how materials behave with electric flow. Metals act more like open doors, while rubber acts more like a locked one. Which everyday object in your kitchen might act like an open door for electricity?",
     },
     {
         "persona": "practical_encourager",
         "mode": "balanced",
         "student": "Renewable and non-renewable—are they the same thing?",
-        "hint": "You picked up that both are energy sources—the passage still separates them by whether the supply can be replenished on a human timescale, like sunshine returning each day versus coal taking millions of years to form. Which of those two timescales sounds closer to \"runs out for good\"?",
+        "hint": "You picked up that both are energy sources—the key split is whether the supply can be replenished on a human timescale, like sunshine returning each day versus coal taking millions of years to form. Which of those two timescales sounds closer to \"runs out for good\"?",
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "Solid liquid gas—I think I've got it.",
-        "hint": "You've linked the three states. Imagine you leave a puddle on a hot pavement: which state change is the excerpt emphasizing as the water disappears into the air? What would you expect to feel near that puddle while it lasts?",
+        "hint": "You've linked the three states. Imagine you leave a puddle on a hot pavement: as the water disappears into the air, what change of state is happening, and what would you expect to feel near that puddle while it lasts?",
     },
     {
         "persona": "analytical_coach",
         "mode": "scaffold",
         "student": "What is photosynthesis?",
-        "hint": "Let's sequence it: (1) light hits the leaf, (2) the excerpt says chlorophyll captures that energy, (3) carbon dioxide and water are combined to store energy in sugars. Which of those inputs must come from the air rather than the soil?",
+        "hint": "Let's sequence it: (1) light hits the leaf, (2) chlorophyll captures that energy, (3) carbon dioxide and water are combined to store energy in sugars. Which of those inputs must come from the air rather than the soil?",
     },
     {
         "persona": "analytical_coach",
         "mode": "balanced",
         "student": "Series and parallel circuits confuse me.",
-        "hint": "The text draws a path-count distinction: one loop versus branches. In a series layout, current has a single route; in parallel, it can split. If one lamp burned out in a series string, what does the excerpt imply about the remaining path?",
+        "hint": "Focus on path count: one loop versus branches. In series, current has a single route; in parallel, it can split. If one lamp burned out in a series string, what happens to the remaining path for current?",
     },
     {
         "persona": "analytical_coach",
         "mode": "nudge",
         "student": "Density is mass over volume, right?",
-        "hint": "Your ratio is pointed the right way. If we kept mass fixed but doubled volume only, how would the excerpt predict the density value to move—up or down? What lab observation would match that shift?",
+        "hint": "Your ratio is pointed the right way. If we kept mass fixed but doubled volume only, would density go up or down—and what would you notice if you compared those two samples side by side?",
     },
     {
         "persona": "curious_explorer",
         "mode": "scaffold",
         "student": "Why do living things need nutrition?",
-        "hint": "Here's one clue from the reading: living things take in materials they can't stay alive without. Nutrition in the excerpt isn't just \"eating for fun\"—it's tied to fueling growth and repair. What do you think happens to an organism that stops taking in those materials?",
+        "hint": "Here's one clue: living things take in materials they cannot stay alive without. Nutrition is not just \"eating for fun\"—it fuels growth and repair. What do you think happens to an organism that stops taking in those materials?",
     },
     {
         "persona": "curious_explorer",
         "mode": "balanced",
         "student": "Acids and bases feel like opposites.",
-        "hint": "You're sensing a pairing the text sets up. The passage links acids and bases through how they react with indicators—not through being random opposites. If an indicator turned one color in lemon juice, what would the excerpt expect when a base is added slowly?",
+        "hint": "You're sensing a real pairing. Acids and bases show themselves through how they react with indicators—not just by being random opposites. If an indicator turned one color in lemon juice, what would you expect when a base is added slowly?",
     },
     {
         "persona": "curious_explorer",
         "mode": "nudge",
         "student": "Refraction is when light bends.",
-        "hint": "Bending is the visible part—but the excerpt ties it to speed changes between media. Suppose light traveled from air into much denser water: would the ray hug the normal more or drift farther from it, according to the passage's logic?",
+        "hint": "Bending is the visible part—and it connects to speed changes when light crosses between media. Suppose light travels from air into much denser water: would the ray hug the normal more or drift farther from it?",
     },
     {
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "I can't tell vertebrates from invertebrates.",
-        "hint": "Picture a backbone like a central tent pole inside some animals but missing in others—the reading uses that internal support to split groups. Worms and insects fall on one side of that split in the excerpt; fish and birds on the other. Where would a spider land, based on that pole idea?",
+        "hint": "Picture a backbone like a central tent pole inside some animals but missing in others—that internal support is how we split the groups. Worms and insects fall on one side; fish and birds on the other. Where would a spider land, based on that pole idea?",
     },
     {
         "persona": "analytical_coach",
         "mode": "balanced",
         "student": "Monocots vs dicots?",
-        "hint": "The text contrasts seed-leaf count and vein patterns. Monocots show parallel veins in the passage's plant examples; dicots show net-like veins. If you only had a leaf drawing, which vein pattern would you measure first?",
+        "hint": "Compare seed-leaf count and vein patterns. Monocots show parallel veins; dicots show net-like veins. If you only had a leaf drawing, which vein pattern would you measure first?",
     },
     {
         "persona": "curious_explorer",
         "mode": "nudge",
         "student": "Sound needs a medium—I remember that.",
-        "hint": "Right—the excerpt stresses that vacuum gaps block sound transfer. What if an astronaut tapped helmet to helmet with no air between—would the vibration still have a material path, according to the text's rule?",
+        "hint": "Sound needs something to travel through, so vacuum gaps block it. What if an astronaut tapped helmet to helmet with no air between—would the vibration still have a material path to travel?",
     },
     {
         "persona": "analytical_coach",
         "mode": "scaffold",
         "student": "Earth's layers are confusing.",
-        "hint": "Work outside-in as the reading does: crust, then mantle, then core. The excerpt gives one property per layer—thickness or state. Which layer does the text place directly under the crust you stand on?",
+        "hint": "Work outside-in: crust, then mantle, then core—each layer has its own thickness or state. Which layer sits directly under the crust you stand on?",
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "Evaporation and boiling—same thing?",
-        "hint": "They're related but the passage treats them at different scales. Boiling hits the whole liquid at a set temperature; evaporation can happen at the surface more quietly. On a windy day at the lake, which process would you notice first without a thermometer?",
+        "hint": "They're related but happen at different scales. Boiling hits the whole liquid at a set temperature; evaporation can happen quietly at the surface. On a windy day at the lake, which process would you notice first without a thermometer?",
     },
     {
         "persona": "curious_explorer",
         "mode": "balanced",
         "student": "What carries oxygen in blood?",
-        "hint": "The reading names a specific component in red blood cells that binds oxygen—not the plasma alone. If that component were missing, which function in the excerpt's circulatory description would break first?",
+        "hint": "A specific component inside red blood cells binds oxygen—not the plasma alone. If that component were missing, which job in circulating blood would fail first?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "nudge",
+        "student": "If I used a wet wooden stick to poke a live wire, what would the textbook say could happen?",
+        "hint": "Dry wood usually resists electric flow, but water can change that picture—wet wood can start to behave more like a path for current. Since water behaves differently than dry wood, what do you think happens to that electrical current when it meets the damp stick in your hand?",
     },
 ]
 
@@ -480,6 +504,145 @@ def _hint_mode(mastery: float) -> HintMode:
     return "balanced"
 
 
+# Phrases that signal wrap-up / gratitude (not a new science attempt).
+_ACKNOWLEDGMENT_PATTERN = re.compile(
+    r"(?:"
+    r"\bthanks?\b|\bthank\s+you\b|\bthx\b|\bty\b|"
+    r"\bi\s+(?:get|got|understand)\s+(?:it|that|this)(?:\s+now)?\b|"
+    r"\bi\s+understood\b|\bunderstood\b|"
+    r"\bthat\s+makes\s+sense\b|\bmakes\s+sense\b|"
+    r"\bgot\s+it\b|\ball\s+clear\b|\bthat(?:'s| is)\s+clear\b|"
+    r"\bmuch\s+clearer\b|\bcrystal\s+clear\b|"
+    r"\bthat\s+helps?\b|\bthat(?:'s| is)\s+helpful\b|"
+    r"\bi(?:'m|\s+am)\s+(?:good|all\s+set|done)\b|"
+    r"\bno\s+more\s+questions?\b|\bthat(?:'s| is)\s+all\b|"
+    r"\bi\s+appreciate\s+(?:it|that)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Residual tokens that suggest the student is still asking about science.
+_ACK_RESIDUAL_SCIENCE_HINT = re.compile(
+    r"\b(?:"
+    r"what|why|how|when|where|which|explain|difference|between|mean|means|"
+    r"conductor|insulator|circuit|energy|force|cell|atom|plant|animal|"
+    r"light|sound|heat|acid|base|density|photosynthesis|current|voltage|"
+    r"solid|liquid|gas|evaporat|boil|refract|lens"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_ACKNOWLEDGMENT_CLOSURES: dict[str, str] = {
+    "practical_encourager": (
+        "Glad that clicked for you—you've built a solid everyday feel for this idea. "
+        "Whenever you're ready for the next concept, just ask."
+    ),
+    "analytical_coach": (
+        "Excellent synthesis—you've locked in the foundational logic for this mechanism. "
+        "Let me know when you're ready to break down the next concept."
+    ),
+    "curious_explorer": (
+        "Nice—you've cracked this piece of the puzzle. "
+        "Whenever curiosity pulls you toward the next mystery, I'm here."
+    ),
+}
+
+
+def _is_acknowledgment_intent(student_answer: str) -> bool:
+    """
+    Lightweight pre-routing gate: detect gratitude / wrap-up / \"I get it\" messages.
+
+    Returns True only when the message is primarily acknowledgment—not a new science
+    question or substantive attempt that happens to include a polite word.
+    """
+    text = (student_answer or "").strip()
+    if not text:
+        return False
+
+    lower = text.lower()
+    words = re.findall(r"[a-z0-9']+", lower)
+    if not words or len(words) > 20:
+        return False
+
+    if not _ACKNOWLEDGMENT_PATTERN.search(lower):
+        return False
+
+    # Strip acknowledgment / filler phrases; leftover science or questions → continue tutoring.
+    residual = _ACKNOWLEDGMENT_PATTERN.sub(" ", lower)
+    residual = re.sub(
+        r"\b(?:"
+        r"great|ok|okay|alright|all\s+right|cool|nice|awesome|perfect|"
+        r"yes|yeah|yep|yup|sure|now|well|really|so|just|then|"
+        r"i|you|it|that|this|a|an|the|and|but|for|to|of|my|me"
+        r")\b",
+        " ",
+        residual,
+        flags=re.IGNORECASE,
+    )
+    residual = re.sub(r"[^\w\s]", " ", residual)
+    residual_words = re.findall(r"[a-z0-9']+", residual.lower())
+
+    if residual_words and _ACK_RESIDUAL_SCIENCE_HINT.search(" ".join(residual_words)):
+        return False
+    if residual_words and len(residual_words) >= 4:
+        return False
+    # "thanks, what about series?" style — leftover after strip still asks something.
+    if "?" in text and residual_words:
+        return False
+    return True
+
+
+def _acknowledgment_closure_response(
+    *,
+    user_id: str,
+    topic_id: str,
+    persona_id: Optional[str],
+    bkt: Optional[ScienceBKT] = None,
+    topic_id_inferred: bool = False,
+    topic_changed: bool = False,
+) -> dict[str, Any]:
+    """Persona-matched closing reply; skips RAG, LLM Socratic loop, and BKT updates."""
+    engine = bkt or _get_default_bkt()
+    mastery = float(engine.get_current_mastery_probability(user_id, topic_id))
+    resolved_persona = _resolve_persona_id(persona_id, user_id)
+    persona_label = _PERSONA_LABELS[resolved_persona]
+    hint_text = _ACKNOWLEDGMENT_CLOSURES[resolved_persona]
+    return {
+        "success": True,
+        "user_id": str(user_id),
+        "topic_id": str(topic_id),
+        "mastery_probability": mastery,
+        "mastery_probability_before": mastery,
+        "updated_mastery_probability": mastery,
+        "hint_mode": _hint_mode(mastery),
+        "persona_id": resolved_persona,
+        "persona_label": persona_label,
+        "hint_text": hint_text,
+        "interaction_score": None,
+        "interaction_score_effective": None,
+        "bkt_updated": False,
+        "bkt_observation_label": None,
+        "tutor_bkt_policy": _tutor_bkt_policy(),
+        "bkt_update_note": "acknowledgment_intent_closure_no_bkt",
+        "risk_flag": False,
+        "retrieval": {
+            "chunks_returned": 0,
+            "query_used": None,
+            "skipped": True,
+            "skip_reason": "acknowledgment_intent",
+        },
+        "frustration_level_used": None,
+        "frustration_score_used": None,
+        "llm_model": None,
+        "conversation_intent": "acknowledgment",
+        "socratic_loop_bypassed": True,
+        "topic_id_inferred": topic_id_inferred,
+        "topic_id_resolved": str(topic_id),
+        "topic_changed": topic_changed,
+        "history_turns_sent": 0,
+    }
+
+
 def _resolve_persona_id(persona_id: Optional[str], user_id: str) -> str:
     """
     Resolve active persona for this turn.
@@ -547,10 +710,11 @@ def _build_system_prompt(
         f"You are **{persona_label}**, a Grade 6–9 science tutor using a multi-persona "
         f"Socratic scaffolding engine.\n"
         f"Active state: persona_id={persona}, hint_mode={mode}.\n"
-        f"Your science authority is ONLY the retrieved textbook excerpts in the user message "
-        f"(collection ``science_syllabus_g6_g9`` — official Grade 6–9 syllabus PDFs). "
-        f"If the student's answer contradicts those excerpts, gently redirect using textbook "
-        f"wording—not the student's mistaken labels.\n\n"
+        f"You speak as a natural, omniscient tutor. Private curriculum notes appear in the user "
+        f"message for YOUR eyes only (collection ``science_syllabus_g6_g9``). Internalize those "
+        f"facts and coach in your own voice. Never reveal the notes as \"text\", \"excerpts\", or "
+        f"\"the textbook\". If the student's ideas conflict with that knowledge, gently redirect "
+        f"using plain science language—not source citations.\n\n"
         f"{_SOCRATIC_GUARDRAILS}\n\n"
         f"--- Active persona × mastery configuration (9-state matrix cell) ---\n"
         f"{state_config}\n\n"
@@ -559,28 +723,29 @@ def _build_system_prompt(
         f"answers your previous question. Acknowledge that answer before scaffolding further.\n"
         f"- MEMORY: Paraphrase a concrete phrase from their latest message so your reply "
         f"clearly responds to their words.\n"
-        f"- FIGURES: Do not name figures, diagrams, exercises, or tables unless you instantly "
-        f"follow with one plain-language sentence supported by the excerpts.\n"
+        f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or page "
+        f"references. Describe the science idea in plain language instead.\n"
         f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
         f"  When frustration is high, soften delivery while still correcting misconceptions "
-        f"and staying grounded in excerpts.\n\n"
+        f"and staying faithful to your private curriculum notes.\n\n"
         f"--- Correction-first protocol ---\n"
-        f"If their science content is wrong relative to the excerpts:\n"
+        f"If their science content is wrong relative to your private notes:\n"
         f"  1) Brief validation of effort or intent (vary phrasing—no canned praise headers).\n"
-        f"  2) Gentle correction via analogy or contrast aligned with the textbook.\n"
-        f"  3) Exactly ONE follow-up question.\n"
+        f"  2) Gentle correction via analogy or contrast about the physical world.\n"
+        f"  3) Exactly ONE follow-up question about conceptual understanding (never reading "
+        f"comprehension of an invisible document).\n"
         f"If substantially correct, validate briefly and bridge before your one question.\n\n"
         f"--- Few-shot reference conversations (study style, not facts) ---\n"
-        f"These show how each persona responds across BKT modes without mechanical openers. "
-        f"Do NOT copy their science content unless your retrieved excerpts support it.\n\n"
+        f"These show natural persona voice across BKT modes—no meta \"text/excerpt\" talk. "
+        f"Do NOT copy their science content unless your private curriculum notes support it.\n\n"
         f"{few_shots}\n\n"
         f"--- interaction_score (JSON field only; never shown in hint_text) ---\n"
         f"Set \"interaction_score\" from 0.0 to 1.0 for how well their **latest** answer matches "
-        f"correct science per the retrieved excerpts. Be calibrated: wrong/vague usually ≤0.35; "
-        f"major misconception ≤0.25; only clearly correct ≥0.78.\n"
+        f"correct science per your private curriculum notes. Be calibrated: wrong/vague usually "
+        f"≤0.35; major misconception ≤0.25; only clearly correct ≥0.78.\n"
         f"  • 0.0–0.35: wrong, vague, or major misconception\n"
         f"  • 0.36–0.77: partial / uncertain (not mastered)\n"
-        f"  • 0.78–1.0: clearly correct and excerpt-aligned\n\n"
+        f"  • 0.78–1.0: clearly correct and curriculum-aligned\n\n"
         f"--- OUTPUT FORMAT (mandatory) ---\n"
         f"Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
         f"≤120 words) and \"interaction_score\" (number). Example: "
@@ -785,6 +950,16 @@ def generate_socratic_hint(
     # before retrieval and model calls.
     load_dotenv(_ENV_PATH)
 
+    if _is_acknowledgment_intent(student_answer):
+        return _acknowledgment_closure_response(
+            user_id=user_id,
+            topic_id=topic_id,
+            persona_id=persona_id,
+            bkt=bkt,
+            topic_id_inferred=False,
+            topic_changed=False,
+        )
+
     engine = bkt or _get_default_bkt()
     mastery_before = float(engine.get_current_mastery_probability(user_id, topic_id))
     kb = retrieve_context(topic_id, k=context_k)
@@ -812,8 +987,9 @@ def generate_socratic_hint(
         f"frustration_signal_score: "
         f"{frustration_signal.frustration_score if frustration_signal else 'unknown'}\n\n"
         f"{thread_prefix}"
-        f"Retrieved textbook excerpts ({source_summary}; may be partial):\n"
-        f"{facts if facts else '[no excerpts retrieved]'}\n\n"
+        f"PRIVATE tutor curriculum notes (do NOT mention these notes, excerpts, or any "
+        f"textbook/source to the student; {source_summary}; may be partial):\n"
+        f"{facts if facts else '[no curriculum notes retrieved]'}\n\n"
         f"Student's **latest** message (verbatim; reply to Tutor above if answering a question):\n"
         f"{student_answer.strip() or '[empty]'}\n"
     )
@@ -967,7 +1143,24 @@ def generate_socratic_hint_auto_topic(
 
     If topic_id is omitted, infer it from question keywords each turn.
     When the inferred topic changes, prior chat history is not sent to the LLM.
+
+    Acknowledgment / gratitude messages short-circuit before topic inference and RAG.
     """
+    if _is_acknowledgment_intent(student_answer):
+        sticky_topic = (
+            topic_id
+            or _last_resolved_topic_by_user.get(str(user_id))
+            or "G6_S1_ORG_CHARS"
+        )
+        return _acknowledgment_closure_response(
+            user_id=user_id,
+            topic_id=sticky_topic,
+            persona_id=persona_id,
+            bkt=bkt,
+            topic_id_inferred=topic_id is None,
+            topic_changed=False,
+        )
+
     resolved_topic = topic_id or infer_topic_id_from_question(
         student_answer,
         conversation_history=conversation_history,

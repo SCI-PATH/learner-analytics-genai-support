@@ -51,6 +51,9 @@ _signal_history: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque
 _latest_topic_by_user: dict[str, str] = {}
 _frustration_history: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=50))
 _chat_history_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=100))
+_assessment_attempts_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=500))
+QuestionType = Literal["MCQ", "SHORT_ANSWER"]
+DistractorTag = Literal["NEAR_MISS", "MISCONCEPTION", "COMPLETE_MISS"]
 _SLIP_HIGH_THRESHOLD = 0.15
 _MASTERY_LOW_THRESHOLD = 0.45
 _MASTERY_CRITICAL_THRESHOLD = 0.20
@@ -175,8 +178,9 @@ def _append_interaction_log(
     topic_id: str,
     interaction_score: Optional[float],
     endpoint: str,
+    frustration_metadata: Optional[dict[str, Any]] = None,
 ) -> None:
-    entry = {
+    entry: dict[str, Any] = {
         "user_id": str(user_id),
         "topic_id": str(topic_id),
         "interaction_score": (
@@ -185,6 +189,10 @@ def _append_interaction_log(
         "timestamp": datetime.now(UTC).isoformat(),
         "endpoint": str(endpoint),
     }
+    if frustration_metadata:
+        for key, value in frustration_metadata.items():
+            if value is not None:
+                entry[key] = value
     rows: list[dict[str, Any]] = []
     if _INTERACTION_LOG_PATH.exists():
         try:
@@ -245,14 +253,23 @@ def _hydrate_live_state_from_db() -> None:
         if event_type == "assessment_submit":
             uid = str(payload.get("user_id") or "")
             topic = str(payload.get("topic_id") or "")
-            label = int(payload.get("label") or 0)
+            if "is_correct" in payload:
+                label = 1 if bool(payload.get("is_correct")) else 0
+            else:
+                label = int(payload.get("label") or 0)
             if not uid or not topic:
                 continue
+            response_time = payload.get("response_time_s")
             try:
-                engine.predict_update(uid, topic, label, None)
+                response_time_s = float(response_time) if response_time is not None else None
+            except (TypeError, ValueError):
+                response_time_s = None
+            try:
+                engine.predict_update(uid, topic, label, response_time_s)
             except ValueError:
                 continue
             _append_signal(uid, topic, float(label))
+            _record_assessment_attempt(payload)
         elif event_type == "frustration_cue":
             uid = str(payload.get("user_id") or "")
             topic = str(payload.get("topic_id") or "")
@@ -260,11 +277,17 @@ def _hydrate_live_state_from_db() -> None:
             source = str(payload.get("source") or "engagement_module")
             if not uid or not topic:
                 continue
+            recorded_at_raw = payload.get("recorded_at")
             signal = upsert_frustration_signal(
                 user_id=uid,
                 topic_id=topic,
                 frustration_score=score,
                 source=source,
+                recorded_at=(
+                    datetime.fromisoformat(str(recorded_at_raw).replace("Z", "+00:00"))
+                    if recorded_at_raw
+                    else None
+                ),
             )
             _frustration_history[(uid, topic)].append(float(signal.frustration_score))
         elif event_type == "chat_turn":
@@ -336,6 +359,76 @@ def _record_chat_turn(
     )
     _latest_topic_by_user[str(user_id)] = str(topic_id)
     _persist_event("chat_turn", record)
+
+
+def _normalize_assessment_attempt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize persisted or incoming assessment payloads into a canonical attempt record."""
+    uid = str(payload.get("user_id") or "")
+    topic = str(payload.get("topic_id") or "")
+    if "is_correct" in payload:
+        is_correct = bool(payload["is_correct"])
+    else:
+        is_correct = bool(int(payload.get("label") or 0))
+    record: dict[str, Any] = {
+        "user_id": uid,
+        "topic_id": topic,
+        "is_correct": is_correct,
+        "label": 1 if is_correct else 0,
+        "timestamp": str(payload.get("timestamp") or datetime.now(UTC).isoformat()),
+    }
+    optional_fields = (
+        "question_type",
+        "distractor_tag",
+        "distractor_label",
+        "similarity_score",
+        "response_time_s",
+        "difficulty_level",
+        "subtopic_id",
+        "question_id",
+        "chosen_distractor_text",
+        "source",
+        "updated_mastery_probability",
+    )
+    for key in optional_fields:
+        if payload.get(key) is not None:
+            record[key] = payload[key]
+    return record
+
+
+def _record_assessment_attempt(payload: dict[str, Any]) -> dict[str, Any]:
+    record = _normalize_assessment_attempt(payload)
+    uid = str(record.get("user_id") or "")
+    if uid:
+        _assessment_attempts_by_user[uid].append(record)
+    return record
+
+
+def _misconception_cloud_label(attempt: dict[str, Any]) -> Optional[str]:
+    if bool(attempt.get("is_correct")):
+        return None
+    label = str(attempt.get("distractor_label") or "").strip()
+    if label:
+        return label
+    chosen = str(attempt.get("chosen_distractor_text") or "").strip()
+    if chosen:
+        return chosen[:80] + ("..." if len(chosen) > 80 else "")
+    tag = str(attempt.get("distractor_tag") or "").strip()
+    if tag:
+        return tag.replace("_", " ").title()
+    return None
+
+
+def _live_distractor_counts(user_id: str) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for attempt in _assessment_attempts_by_user.get(str(user_id), []):
+        cloud_label = _misconception_cloud_label(attempt)
+        if cloud_label:
+            counts[cloud_label] += 1
+    return dict(counts)
+
+
+def _live_attempts_for_user(user_id: str) -> list[dict[str, Any]]:
+    return list(_assessment_attempts_by_user.get(str(user_id), []))
 
 
 def _replay_user_attempts(
@@ -461,6 +554,26 @@ class AssessmentSubmitRequest(BaseModel):
     user_id: str = Field(..., description="Student identifier")
     topic_id: str = Field(..., description="Curriculum topic / skill id, e.g. G6_S8_ELE_CIRCUITS")
     is_correct: bool = Field(..., description="Ground-truth correctness for this assessment item")
+    question_type: Optional[QuestionType] = Field(
+        None, description="MCQ or SHORT_ANSWER — drives analytics field interpretation"
+    )
+    distractor_tag: Optional[DistractorTag] = Field(
+        None, description="Wrong MCQ error category: NEAR_MISS, MISCONCEPTION, or COMPLETE_MISS"
+    )
+    distractor_label: Optional[str] = Field(
+        None, description="Short misconception phrase for Misconception Cloud aggregation"
+    )
+    similarity_score: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Short-answer semantic similarity to marking scheme"
+    )
+    response_time_s: Optional[float] = Field(None, ge=0.0, description="Seconds taken to answer")
+    difficulty_level: Optional[float] = Field(None, description="Item difficulty on question-engine scale")
+    subtopic_id: Optional[str] = Field(None, description="Optional finer curriculum label")
+    question_id: Optional[str] = Field(None, description="Stable question item id for audit/dedupe")
+    chosen_distractor_text: Optional[str] = Field(
+        None, description="Full text of chosen wrong MCQ option when label is omitted"
+    )
+    source: Optional[str] = Field(None, description="Calling module identifier, e.g. question_engine_v1")
 
 
 class FrustrationCueSubmitRequest(BaseModel):
@@ -525,6 +638,21 @@ def _startup_init() -> None:
     _hydrate_live_state_from_db()
 
 
+def _frustration_metadata_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Extract Epic 7 audit fields for interaction_logs.json."""
+    keys = (
+        "frustration_raw",
+        "effective_score",
+        "source_tag",
+        "persona_id_used",
+        "frustration_internal_score",
+        "frustration_external_effective",
+        "frustration_fused_score",
+        "frustration_level_used",
+    )
+    return {k: result.get(k) for k in keys if result.get(k) is not None}
+
+
 @app.post("/tutor/hint")
 def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
     """
@@ -563,6 +691,7 @@ def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
             topic_id=str(result.get("topic_id") or req.topic_id),
             interaction_score=score_val,
             endpoint="/tutor/hint",
+            frustration_metadata=_frustration_metadata_from_result(result),
         )
         if isinstance(score, (int, float)):
             topic_used = str(result.get("topic_id") or req.topic_id)
@@ -607,6 +736,7 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
             topic_id=resolved_topic,
             interaction_score=score_val,
             endpoint="/tutor/hint-auto-topic",
+            frustration_metadata=_frustration_metadata_from_result(result),
         )
         if isinstance(score, (int, float)):
             topic_used = resolved_topic
@@ -625,8 +755,9 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     """
     engine = get_shared_bkt_engine()
     label = 1 if req.is_correct else 0
+    response_time_s = float(req.response_time_s) if req.response_time_s is not None else None
     try:
-        bkt_out = engine.predict_update(req.user_id, req.topic_id, label, None)
+        bkt_out = engine.predict_update(req.user_id, req.topic_id, label, response_time_s)
     except ValueError as exc:
         return {
             "success": False,
@@ -636,14 +767,27 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
         }
     mastery = float(engine.get_current_mastery_probability(req.user_id, req.topic_id))
     _append_signal(req.user_id, req.topic_id, float(label))
-    _persist_event(
-        "assessment_submit",
+    attempt_record = _record_assessment_attempt(
         {
             "user_id": str(req.user_id),
             "topic_id": str(req.topic_id),
+            "is_correct": bool(req.is_correct),
             "label": int(label),
-        },
+            "question_type": req.question_type,
+            "distractor_tag": req.distractor_tag,
+            "distractor_label": req.distractor_label,
+            "similarity_score": req.similarity_score,
+            "response_time_s": response_time_s,
+            "difficulty_level": req.difficulty_level,
+            "subtopic_id": req.subtopic_id,
+            "question_id": req.question_id,
+            "chosen_distractor_text": req.chosen_distractor_text,
+            "source": req.source,
+            "updated_mastery_probability": mastery,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
     )
+    _persist_event("assessment_submit", attempt_record)
     return {
         "success": True,
         "user_id": req.user_id,
@@ -654,6 +798,22 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
         "risk_flag": bool(bkt_out.get("at_risk")),
         "bkt_observation_label": label,
         "label_source": "assessment",
+        "assessment_fields_persisted": {
+            key: attempt_record.get(key)
+            for key in (
+                "question_type",
+                "distractor_tag",
+                "distractor_label",
+                "similarity_score",
+                "response_time_s",
+                "difficulty_level",
+                "subtopic_id",
+                "question_id",
+                "chosen_distractor_text",
+                "source",
+            )
+            if attempt_record.get(key) is not None
+        },
     }
 
 
@@ -679,6 +839,7 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
             "topic_id": str(req.topic_id),
             "frustration_score": float(signal.frustration_score),
             "source": str(signal.source),
+            "recorded_at": signal.recorded_at.isoformat(),
         },
     )
     return {
@@ -688,6 +849,9 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
         "frustration_score": signal.frustration_score,
         "frustration_level": signal.level,
         "source": signal.source,
+        "recorded_at": signal.recorded_at.isoformat(),
+        "decay_tau_seconds": 600,
+        "effective_floor": 0.2,
         "used_by": ["/tutor/hint", "/tutor/hint-auto-topic"],
     }
 
@@ -1034,14 +1198,25 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
 
     mode:
     - replay_logs: derive profile from synthetic_logs.csv replay + in-memory cues/chat
-    - live_state: derive BKT values from current shared engine state (attempt history still from logs)
+    - live_state: derive BKT values from current shared engine state; assessment analytics prefer
+      live Question Engine attempts when present, else synthetic-log fallback.
     """
     if mode not in {"replay_logs", "live_state"}:
         return {"success": False, "error": "mode must be replay_logs or live_state"}
 
     replay_engine = _get_replay_engine()
     known_topics = sorted(replay_engine.skill_map.keys())
-    attempts, distractor_counts, mastery_by_topic, mastery_all = _replay_user_attempts(user_id)
+    attempts, simulated_distractor_counts, mastery_by_topic, mastery_all = _replay_user_attempts(
+        user_id
+    )
+    live_attempts = _live_attempts_for_user(user_id)
+    live_distractor_counts = _live_distractor_counts(user_id)
+    use_live_distractors = bool(live_distractor_counts)
+    distractor_counts = live_distractor_counts if use_live_distractors else simulated_distractor_counts
+    distractor_source = (
+        "question_engine_live" if use_live_distractors else "simulated_from_incorrect_attempts_in_synthetic_logs"
+    )
+    profile_attempts = live_attempts if live_attempts else attempts
 
     if mode == "live_state":
         engine = get_shared_bkt_engine()
@@ -1107,7 +1282,20 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
     )[:10]
 
     chat_tail = list(_chat_history_by_user.get(str(user_id), []))[-5:]
-    timeline_tail = attempts[-10:]
+    if live_attempts:
+        timeline_tail = [
+            {
+                "topic_id": str(row.get("topic_id") or ""),
+                "is_correct": bool(row.get("is_correct")),
+                "response_time_s": row.get("response_time_s"),
+                "mastery_probability": row.get("updated_mastery_probability"),
+                "distractor_label": row.get("distractor_label"),
+                "question_type": row.get("question_type"),
+            }
+            for row in live_attempts[-10:]
+        ]
+    else:
+        timeline_tail = attempts[-10:]
     engagement_tail = _load_interaction_logs_for_user(user_id, limit=10)
     engagement_scores = [
         float(x.get("interaction_score"))
@@ -1125,7 +1313,8 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
         "bkt_parameters": bkt_parameters,
         "assessment_insights": {
             "most_frequent_distractor_tags": top_distractors,
-            "attempts_count": len(attempts),
+            "attempts_count": len(profile_attempts),
+            "live_attempts_count": len(live_attempts),
         },
         "engagement_metrics": {
             "average_frustration_cue": avg_frustration,
@@ -1142,7 +1331,7 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
         "chat_history_last_5": chat_tail,
         "critical_confusion_turns": critical_confusion_turns,
         "meta": {
-            "distractor_source": "simulated_from_incorrect_attempts_in_synthetic_logs",
+            "distractor_source": distractor_source,
             "mastery_timeline_points": len(timeline_tail),
             "engagement_points": len(engagement_tail),
             "chat_points": len(chat_tail),

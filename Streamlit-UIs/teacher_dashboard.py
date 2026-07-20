@@ -863,6 +863,12 @@ div[data-testid="stDataFrame"] table {
                 "Student is participating well in dialogue but struggling with formal assessments."
             )
 
+    distractor_source = (profile.get("meta") or {}).get("distractor_source")
+    if distractor_source == "question_engine_live":
+        st.caption("Misconception Cloud uses live Question Engine distractor labels.")
+    elif distractor_source:
+        st.caption("Misconception Cloud uses simulated tags from synthetic log replay (no live attempts yet).")
+
     misconceptions_df = pd.DataFrame(profile.get("assessment_insights", {}).get("most_frequent_distractor_tags") or [])
     if not misconceptions_df.empty:
         misconceptions_df = misconceptions_df.sort_values("count", ascending=False)

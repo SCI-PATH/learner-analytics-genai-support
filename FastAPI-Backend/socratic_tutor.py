@@ -30,10 +30,12 @@ Environment:
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -274,6 +276,30 @@ _DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 _frustration_state: dict[tuple[str, str], "FrustrationSignal"] = {}
 _last_resolved_topic_by_user: dict[str, str] = {}
 
+# Epic 7 — frustration signal lifecycle (tone/persona only; zero BKT impact).
+FRUSTRATION_DECAY_TAU_SECONDS = 600.0  # 10 minutes
+FRUSTRATION_EFFECTIVE_FLOOR = 0.2
+FRUSTRATION_FUSION_EXTERNAL_WEIGHT = 0.7
+FRUSTRATION_FUSION_INTERNAL_WEIGHT = 0.3
+FRUSTRATION_SUCCESS_CLEAR_THRESHOLD = 0.78
+
+# Lightweight chat frustration heuristics (internal fallback).
+_CHAT_FRUSTRATION_PHRASES: tuple[str, ...] = (
+    r"\bi\s+don'?t\s+know\b",
+    r"\bno\s+idea\b",
+    r"\bi'?m\s+stuck\b",
+    r"\bconfused\b",
+    r"\bdon'?t\s+understand\b",
+    r"\bcan'?t\s+understand\b",
+    r"\bthis\s+is\s+hard\b",
+    r"\btoo\s+hard\b",
+    r"\bhelp\s+me\b",
+    r"\bi\s+give\s+up\b",
+    r"\bwhat\s+even\s+is\b",
+    r"\bmake\s+no\s+sense\b",
+    r"\bdoesn'?t\s+make\s+sense\b",
+)
+
 # Extra student phrasing aliases layered on top of syllabus keywords (all grades).
 _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
     "G6_S1_ORG_CHARS": [
@@ -289,11 +315,95 @@ _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
 
 @dataclass
 class FrustrationSignal:
-    """Latest engagement signal used to adapt tutor tone."""
+    """Latest engagement signal used to adapt tutor tone (not BKT mastery)."""
 
     frustration_score: float
     level: Literal["low", "medium", "high"]
     source: str = "engagement_module"
+    recorded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class FrustrationResolution:
+    """Resolved affective state for one tutor turn (fusion + decay applied)."""
+
+    level: Optional[Literal["low", "medium", "high"]]
+    fused_score: float
+    effective_score: float
+    frustration_raw: Optional[float]
+    external_effective: Optional[float]
+    internal_score: float
+    source_tag: str
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_recorded_at(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return _utc_now()
+
+
+def _frustration_level_from_score(score: float) -> Literal["low", "medium", "high"]:
+    s = max(0.0, min(1.0, float(score)))
+    if s > 0.66:
+        return "high"
+    if s >= 0.34:
+        return "medium"
+    return "low"
+
+
+def _decayed_effective_score(raw: float, recorded_at: datetime) -> float:
+    """Exponential decay: effective = raw * exp(-age / tau)."""
+    now = _utc_now()
+    rec = _parse_recorded_at(recorded_at)
+    age_sec = max(0.0, (now - rec).total_seconds())
+    return max(0.0, min(1.0, float(raw))) * math.exp(-age_sec / FRUSTRATION_DECAY_TAU_SECONDS)
+
+
+def score_frustration_from_chat(student_answer: str) -> float:
+    """
+    Lightweight internal frustration heuristic from free-text (0.0–1.0).
+
+    Scans for confusion phrases, shouting (ALL CAPS), repeated punctuation,
+    and very short baffled replies. Used when external engagement cues are
+    missing or expired.
+    """
+    text = (student_answer or "").strip()
+    if not text:
+        return 0.0
+
+    lower = text.lower()
+    score = 0.0
+
+    for pattern in _CHAT_FRUSTRATION_PHRASES:
+        if re.search(pattern, lower):
+            score += 0.22
+
+    if re.search(r"\?{2,}", text):
+        score += 0.18
+    if re.search(r"!{2,}", text):
+        score += 0.12
+
+    letters = re.findall(r"[A-Za-z]", text)
+    if len(letters) >= 8:
+        upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+        if upper_ratio >= 0.75:
+            score += 0.20
+
+    words = re.findall(r"[a-z0-9']+", lower)
+    if len(words) <= 3 and ("?" in text or any(w in lower for w in ("help", "stuck", "confused"))):
+        score += 0.15
+
+    return max(0.0, min(1.0, score))
 
 
 def upsert_frustration_signal(
@@ -302,23 +412,21 @@ def upsert_frustration_signal(
     frustration_score: float,
     *,
     source: str = "engagement_module",
+    recorded_at: Optional[datetime] = None,
 ) -> FrustrationSignal:
     """
-    Store the latest frustration cue for a user+topic.
+    Store the latest external frustration cue for a user+topic.
 
-    ``frustration_score`` is clamped to [0, 1] and mapped to:
-    - low    : < 0.34
-    - medium : 0.34..0.66
-    - high   : > 0.66
+    ``frustration_score`` is clamped to [0, 1] and mapped to low / medium / high.
     """
     score = max(0.0, min(1.0, float(frustration_score)))
-    if score > 0.66:
-        level: Literal["low", "medium", "high"] = "high"
-    elif score >= 0.34:
-        level = "medium"
-    else:
-        level = "low"
-    signal = FrustrationSignal(frustration_score=score, level=level, source=source)
+    level = _frustration_level_from_score(score)
+    signal = FrustrationSignal(
+        frustration_score=score,
+        level=level,
+        source=source,
+        recorded_at=recorded_at or _utc_now(),
+    )
     _frustration_state[(str(user_id), str(topic_id))] = signal
     return signal
 
@@ -327,16 +435,130 @@ def _get_frustration_signal(user_id: str, topic_id: str) -> Optional[Frustration
     return _frustration_state.get((str(user_id), str(topic_id)))
 
 
-def _tone_guidance_from_frustration(signal: Optional[FrustrationSignal]) -> str:
-    if signal is None:
-        return (
-            "No external frustration signal is available for this turn. Keep your normal "
-            "warm, concise Socratic tone."
+def resolve_frustration_for_turn(
+    user_id: str,
+    topic_id: str,
+    student_answer: str,
+) -> FrustrationResolution:
+    """
+    Fuse decayed external cue (if any) with internal chat heuristic for this turn.
+    """
+    internal = score_frustration_from_chat(student_answer)
+    stored = _get_frustration_signal(user_id, topic_id)
+    external_raw: Optional[float] = None
+    external_effective: Optional[float] = None
+
+    if stored is not None:
+        external_raw = float(stored.frustration_score)
+        decayed = _decayed_effective_score(external_raw, stored.recorded_at)
+        if decayed >= FRUSTRATION_EFFECTIVE_FLOOR:
+            external_effective = decayed
+
+    if external_effective is not None:
+        fused = (
+            FRUSTRATION_FUSION_EXTERNAL_WEIGHT * external_effective
+            + FRUSTRATION_FUSION_INTERNAL_WEIGHT * internal
         )
-    if signal.level == "high":
+        source_tag = "fused"
+    elif internal >= FRUSTRATION_EFFECTIVE_FLOOR:
+        fused = internal
+        source_tag = "internal_only"
+    else:
+        return FrustrationResolution(
+            level=None,
+            fused_score=0.0,
+            effective_score=0.0,
+            frustration_raw=external_raw,
+            external_effective=external_effective,
+            internal_score=internal,
+            source_tag="none",
+        )
+
+    fused = max(0.0, min(1.0, fused))
+    if fused < FRUSTRATION_EFFECTIVE_FLOOR:
+        return FrustrationResolution(
+            level=None,
+            fused_score=fused,
+            effective_score=fused,
+            frustration_raw=external_raw,
+            external_effective=external_effective,
+            internal_score=internal,
+            source_tag=source_tag,
+        )
+
+    return FrustrationResolution(
+        level=_frustration_level_from_score(fused),
+        fused_score=fused,
+        effective_score=fused,
+        frustration_raw=external_raw,
+        external_effective=external_effective,
+        internal_score=internal,
+        source_tag=source_tag,
+    )
+
+
+def consume_frustration_after_hint(
+    user_id: str,
+    topic_id: str,
+    interaction_score: Optional[float],
+) -> None:
+    """
+    Post-hint lifecycle: clear on success, otherwise step down one frustration band.
+
+    Does not touch BKT state.
+    """
+    key = (str(user_id), str(topic_id))
+    stored = _frustration_state.get(key)
+    if stored is None:
+        return
+
+    if interaction_score is not None and float(interaction_score) >= FRUSTRATION_SUCCESS_CLEAR_THRESHOLD:
+        del _frustration_state[key]
+        return
+
+    if stored.level == "high":
+        new_raw = 0.50
+    elif stored.level == "medium":
+        new_raw = 0.25
+    else:
+        del _frustration_state[key]
+        return
+
+    _frustration_state[key] = FrustrationSignal(
+        frustration_score=new_raw,
+        level=_frustration_level_from_score(new_raw),
+        source=stored.source,
+        recorded_at=_utc_now(),
+    )
+
+
+def build_frustration_audit_fields(
+    resolution: FrustrationResolution,
+    persona_id: str,
+) -> dict[str, Any]:
+    """Metadata for interaction_logs.json thesis audit pipeline."""
+    return {
+        "frustration_raw": resolution.frustration_raw,
+        "frustration_internal_score": resolution.internal_score,
+        "frustration_external_effective": resolution.external_effective,
+        "effective_score": resolution.effective_score,
+        "frustration_fused_score": resolution.fused_score,
+        "source_tag": resolution.source_tag,
+        "frustration_level_used": resolution.level,
+        "persona_id_used": persona_id,
+    }
+
+
+def _tone_guidance_from_frustration(resolution: FrustrationResolution) -> str:
+    if resolution.level is None:
+        return (
+            "No active frustration signal for this turn (decayed/expired or calm chat). "
+            "Keep your normal warm, concise Socratic tone."
+        )
+    if resolution.level == "high":
         return (
             "Frustration signal is HIGH — apply these tone rules even where they relax the "
-            "usual correction-first *shape* (still be textbook-accurate and Socratic, no full solutions):\n"
+            "usual correction-first *shape* (still be curriculum-accurate and Socratic, no full solutions):\n"
             "- Open with brief reassurance or empathy for confusion; normalize not knowing.\n"
             "- Do NOT open by quoting the student only to contrast or contradict (avoid "
             "'You said \"...\", but...' / 'You said X, but earlier...').\n"
@@ -345,7 +567,7 @@ def _tone_guidance_from_frustration(signal: Optional[FrustrationSignal]) -> str:
             "- If they say 'I don't know' / 'no idea', answer with warmth first—never imply they should "
             "already know the answer."
         )
-    if signal.level == "medium":
+    if resolution.level == "medium":
         return (
             "Frustration signal is MEDIUM. Be supportive and clear; keep corrections gentle, "
             "avoid dense jargon, and prefer one focused question over a multi-part drill."
@@ -643,11 +865,17 @@ def _acknowledgment_closure_response(
     }
 
 
-def _resolve_persona_id(persona_id: Optional[str], user_id: str) -> str:
+def _resolve_persona_id(
+    persona_id: Optional[str],
+    user_id: str,
+    *,
+    frustration_level: Optional[Literal["low", "medium", "high"]] = None,
+) -> str:
     """
     Resolve active persona for this turn.
 
-    Priority: client ``persona_id`` → ``TUTOR_DEFAULT_PERSONA`` env → random rotation.
+    Priority: client ``persona_id`` → ``TUTOR_DEFAULT_PERSONA`` env → high-frustration
+    nudge (Practical Encourager) → random rotation.
     """
     if persona_id:
         normalized = persona_id.strip().lower().replace("-", "_").replace(" ", "_")
@@ -662,7 +890,9 @@ def _resolve_persona_id(persona_id: Optional[str], user_id: str) -> str:
         if resolved:
             return resolved
 
-    # Random per turn when client does not pin a persona.
+    if frustration_level == "high":
+        return "practical_encourager"
+
     _ = user_id  # reserved for future per-learner rotation policies
     return random.choice(list(_VALID_PERSONAS))
 
@@ -966,10 +1196,15 @@ def generate_socratic_hint(
     facts = (kb.get("facts_text") or "").strip()
     source_summary = _retrieval_source_summary(kb)
     mode = _hint_mode(mastery_before)
-    resolved_persona = _resolve_persona_id(persona_id, user_id)
+    frustration_resolution = resolve_frustration_for_turn(user_id, topic_id, student_answer)
+    resolved_persona = _resolve_persona_id(
+        persona_id,
+        user_id,
+        frustration_level=frustration_resolution.level,
+    )
     persona_label = _PERSONA_LABELS[resolved_persona]
-    frustration_signal = _get_frustration_signal(user_id, topic_id)
-    tone_guidance = _tone_guidance_from_frustration(frustration_signal)
+    tone_guidance = _tone_guidance_from_frustration(frustration_resolution)
+    frustration_audit = build_frustration_audit_fields(frustration_resolution, resolved_persona)
 
     hist_block = _format_conversation_history(conversation_history)
     thread_prefix = (
@@ -983,9 +1218,9 @@ def generate_socratic_hint(
         f"hint_mode: {mode}\n"
         f"persona_id: {resolved_persona}\n"
         f"persona_label: {persona_label}\n\n"
-        f"frustration_signal_level: {frustration_signal.level if frustration_signal else 'unknown'}\n"
-        f"frustration_signal_score: "
-        f"{frustration_signal.frustration_score if frustration_signal else 'unknown'}\n\n"
+        f"frustration_signal_level: {frustration_resolution.level or 'none'}\n"
+        f"frustration_effective_score: {frustration_resolution.effective_score:.4f}\n"
+        f"frustration_source_tag: {frustration_resolution.source_tag}\n\n"
         f"{thread_prefix}"
         f"PRIVATE tutor curriculum notes (do NOT mention these notes, excerpts, or any "
         f"textbook/source to the student; {source_summary}; may be partial):\n"
@@ -1052,10 +1287,9 @@ def generate_socratic_hint(
                 "chunks_returned": kb.get("chunks_returned"),
                 "query_used": kb.get("query_used"),
             },
-            "frustration_level_used": frustration_signal.level if frustration_signal else None,
-            "frustration_score_used": (
-                frustration_signal.frustration_score if frustration_signal else None
-            ),
+            "frustration_level_used": frustration_resolution.level,
+            "frustration_score_used": frustration_resolution.effective_score,
+            **frustration_audit,
             "tutor_bkt_policy": _tutor_bkt_policy(),
             "llm_model": None,
             "error": str(exc),
@@ -1098,6 +1332,8 @@ def generate_socratic_hint(
     else:
         bkt_note = parse_err or "no_interaction_score_bkt_skipped"
 
+    consume_frustration_after_hint(user_id, topic_id, score_effective)
+
     return {
         "success": True,
         "user_id": str(user_id),
@@ -1120,10 +1356,9 @@ def generate_socratic_hint(
             "chunks_returned": kb.get("chunks_returned"),
             "query_used": kb.get("query_used"),
         },
-        "frustration_level_used": frustration_signal.level if frustration_signal else None,
-        "frustration_score_used": (
-            frustration_signal.frustration_score if frustration_signal else None
-        ),
+        "frustration_level_used": frustration_resolution.level,
+        "frustration_score_used": frustration_resolution.effective_score,
+        **frustration_audit,
         "llm_model": model,
     }
 
@@ -1192,4 +1427,10 @@ __all__ = [
     "get_shared_bkt_engine",
     "infer_topic_id_from_question",
     "upsert_frustration_signal",
+    "score_frustration_from_chat",
+    "resolve_frustration_for_turn",
+    "consume_frustration_after_hint",
+    "build_frustration_audit_fields",
+    "FrustrationSignal",
+    "FrustrationResolution",
 ]

@@ -3,8 +3,8 @@ Epic 4: Educator Insight Dashboard (Streamlit)
 
 Classroom Mastery Heatmap (high-density G6–G9):
 - Calls FastAPI endpoint /api/v1/mastery/matrix for real mastery scores.
-- Dynamically loads all topic columns from Data/Skill-Heirarchies-G6-G9.xlsx.
-- Horizontal overflow for 57-topic grids (no crushed / overlapping headers).
+- Dynamically loads all topic columns from Data/Skill-Heirarchies-G6-G9-Full-Chapters.xlsx.
+- Horizontal overflow for full G6–G9 grids (chapter-aligned topic IDs).
 - Strict BKT color bands:
   * Red    : < 0.50  (At Risk)
   * Orange : 0.50 - 0.79  (Learning)
@@ -27,7 +27,15 @@ import streamlit as st
 DEFAULT_API_BASE = "http://127.0.0.1:8000"
 DEFAULT_API_TIMEOUT_S = 180.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SKILL_HIERARCHY_XLSX = PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9.xlsx"
+SKILL_HIERARCHY_CANDIDATES = [
+    PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9-Full-Chapters.xlsx",
+    PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9-UPDATED.xlsx",
+    PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9.xlsx",
+]
+SKILL_HIERARCHY_XLSX = next(
+    (p for p in SKILL_HIERARCHY_CANDIDATES if p.is_file()),
+    SKILL_HIERARCHY_CANDIDATES[-1],
+)
 _TOPIC_ID_RE = re.compile(r"^G[6-9]_", re.IGNORECASE)
 
 # Strict BKT mastery boundaries (probability scale).
@@ -47,22 +55,29 @@ DEFAULT_STUDENTS = [
 def _load_skill_hierarchy() -> tuple[tuple[str, ...], dict[str, str]]:
     """Load topic IDs and display labels from the merged G6–G9 skill hierarchy."""
     fallback_topics = (
-        "G6_S1_ORG_CHARS",
-        "G6_S1_ORG_CLASS",
-        "G6_S2_MAT_PROPS",
-        "G6_S2_MAT_STATES",
-        "G6_S4_ENE_SOURCES",
-        "G6_S8_ELE_CIRCUITS",
-        "G6_S8_ELE_CONDINS",
+        "G6_C1_ORG_CHARS",
+        "G6_C1_ORG_DIFF",
+        "G6_C2_MAT_STATES",
+        "G6_C2_MAT_PROPS",
+        "G6_C4_ENE_SOURCES",
+        "G6_C8_ELE_CIRCUITS",
+        "G6_C8_ELE_CONDINS",
     )
     fallback_labels = {tid: tid for tid in fallback_topics}
     if not SKILL_HIERARCHY_XLSX.is_file():
         return fallback_topics, fallback_labels
 
     df = pd.read_excel(SKILL_HIERARCHY_XLSX, sheet_name=0)
-    topic_col = "Topic ID (Mocked for Assessment Module)"
-    ref_col = "Curriculum Reference"
-    if topic_col not in df.columns:
+    # Support both old and new column names for the canonical topic ID.
+    topic_col = None
+    for col in df.columns:
+        name = str(col)
+        low = name.lower()
+        if "topic" in low and "id" in low:
+            topic_col = name
+            break
+    ref_col = "Curriculum Reference" if "Curriculum Reference" in df.columns else None
+    if topic_col is None:
         return fallback_topics, fallback_labels
 
     topics: list[str] = []
@@ -72,7 +87,7 @@ def _load_skill_hierarchy() -> tuple[tuple[str, ...], dict[str, str]]:
         if not tid or not _TOPIC_ID_RE.match(tid):
             continue
         topics.append(tid)
-        ref = str(row.get(ref_col) or "").strip() if ref_col in df.columns else ""
+        ref = str(row.get(ref_col) or "").strip() if ref_col else ""
         labels[tid] = ref if ref else tid
 
     unique_topics = list(dict.fromkeys(topics))

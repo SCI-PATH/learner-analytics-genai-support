@@ -13,7 +13,7 @@ Build / refresh the index:
 
 Use from code:
     from knowledge_base import retrieve_context
-    facts = retrieve_context("G7_S3_ELE_CURRENTS")
+    facts = retrieve_context("G8_C11_PHO_PROCESS")
 """
 
 from __future__ import annotations
@@ -23,10 +23,26 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from curriculum_topics import (
+    FALLBACK_TOPIC_ID,
+    TOPIC_KEYWORDS,
+    TOPIC_QUERY_BOOST,
+    normalize_topic_id,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _SYLLABUS_DIR = PROJECT_ROOT / "Data" / "Syllabi"
 _SYLLABUS_PDF_SPECS: list[tuple[Path, int]] = [
+    (_SYLLABUS_DIR / "Grade 6" / "science G-6 E (1).pdf", 6),
+    (_SYLLABUS_DIR / "Grade 7" / "science G-7 P-I E.pdf", 7),
+    (_SYLLABUS_DIR / "Grade 7" / "Grade_7_TextBook_English_Part_2.pdf", 7),
+    (_SYLLABUS_DIR / "Grade 8" / "science G8 P-I E.pdf", 8),
+    (_SYLLABUS_DIR / "Grade 8" / "science G-8 P-II E.pdf", 8),
+    (_SYLLABUS_DIR / "Grade 9" / "science G-9 P-I E.pdf", 9),
+    (_SYLLABUS_DIR / "Grade 9" / "Science Part II English G-9.pdf", 9),
+]
+_LEGACY_PDF_SPECS: list[tuple[Path, int]] = [
     (_SYLLABUS_DIR / "science G-6 E (1).pdf", 6),
     (_SYLLABUS_DIR / "science G-7 P-I E.pdf", 7),
     (_SYLLABUS_DIR / "science G8 P-I E.pdf", 8),
@@ -37,287 +53,21 @@ _COLLECTION = "science_syllabus_g6_g9"
 _EMBED_MODEL = "all-MiniLM-L6-v2"
 _CHROMA_ADD_BATCH = 256
 
-# Topic IDs → retrieval / chunk-tagging keywords (grades 6–9).
-_TOPIC_KEYWORDS: dict[str, list[str]] = {
-    # --- Grade 6 ---
-    "G6_S1_ORG_CLASS": [
-        "classification", "classify", "living things", "organism", "kingdom",
-        "vertebrate", "invertebrate",
-    ],
-    "G6_S1_ORG_CHARS": [
-        "characteristics", "living", "movement", "nutrition", "respiration",
-        "reproduction", "growth", "excretion", "sensitivity",
-    ],
-    "G6_S2_MAT_PROPS": [
-        "properties of matter", "density", "hardness", "solubility", "conductivity",
-        "melting", "boiling", "malleability",
-    ],
-    "G6_S2_MAT_STATES": [
-        "states of matter", "solid", "liquid", "gas", "particle", "melting",
-        "freezing", "evaporation", "condensation",
-    ],
-    "G6_S4_ENE_SOURCES": [
-        "energy", "source", "renewable", "non-renewable", "fuel", "fossil",
-        "solar", "wind",
-    ],
-    "G6_S8_ELE_CIRCUITS": [
-        "electric circuit", "circuit", "current", "switch", "bulb", "lamp", "cell",
-        "battery", "wire", "series", "parallel",
-    ],
-    "G6_S8_ELE_CONDINS": [
-        "conductor", "insulator", "conducting", "insulating", "metal", "plastic",
-        "rubber", "wood",
-    ],
-    # --- Grade 7 ---
-    "G7_S1_PLA_DIVER": [
-        "morphological", "plant", "leaf", "root", "stem", "flower", "diversity",
-        "features of plants",
-    ],
-    "G7_S1_PLA_CLASSIF": [
-        "monocot", "dicot", "monocots", "dicots", "plant classification",
-        "cotyledon", "seed leaf",
-    ],
-    "G7_S2_STA_CHARGES": [
-        "static", "charging", "charge", "electrostatic", "friction", "rubbing",
-        "static electricity",
-    ],
-    "G7_S2_STA_CAPACIT": [
-        "capacitor", "capacitance", "static electricity", "store charge",
-    ],
-    "G7_S3_ELE_SOURCES": [
-        "electricity generation", "power station", "generator", "hydro", "thermal",
-        "solar panel", "wind turbine",
-    ],
-    "G7_S3_ELE_CURRENTS": [
-        "electric current", "direct current", "alternating current", "dc", "ac",
-        "ammeter", "flow of charge",
-    ],
-    "G7_S4_WAT_SOLVENT": [
-        "universal solvent", "dissolve", "dissolving", "solute", "solution",
-        "water as solvent",
-    ],
-    "G7_S4_WAT_COOLANT": [
-        "coolant", "cooling", "thermal properties of water", "heat capacity",
-    ],
-    "G7_S5_ACI_IDENTIF": [
-        "acid", "base", "alkali", "identify acid", "identify base", "litmus",
-        "laboratory acid",
-    ],
-    "G7_S5_ACI_INDICAT": [
-        "ph indicator", "indicator", "neutralization", "neutralise", "ph scale",
-        "universal indicator",
-    ],
-    "G7_S6_ANI_CLASSIF": [
-        "vertebrate", "invertebrate", "dichotomous", "classification key",
-        "animal classification",
-    ],
-    "G7_S6_ANI_ADAPTAT": [
-        "adaptation", "adapted", "habitat", "survive", "camouflage", "migration",
-    ],
-    "G7_S7_ENE_FORMS": [
-        "kinetic energy", "potential energy", "thermal energy", "chemical energy",
-        "forms of energy",
-    ],
-    "G7_S7_ENE_TRANSF": [
-        "energy transformation", "energy transfer", "convert energy",
-        "conservation of energy",
-    ],
-    "G7_S8_EAR_STRUCT": [
-        "earth structure", "crust", "mantle", "core", "inner core", "outer core",
-        "layers of the earth",
-    ],
-    "G7_S8_EAR_TECTON": [
-        "tectonic", "plate", "plate movement", "earthquake", "volcano",
-        "continental drift",
-    ],
-    "G7_S9_LIG_SHADOWS": [
-        "shadow", "umbra", "penumbra", "opaque", "light source", "eclipse",
-    ],
-    "G7_S9_LIG_MIRRORS": [
-        "mirror", "reflection", "plane mirror", "curved mirror", "image",
-        "reflected light",
-    ],
-    "G7_S10_MIC_LIGHT": [
-        "light microscope", "compound microscope", "magnification", "eyepiece",
-        "objective lens",
-    ],
-    "G7_S10_MIC_ELECTR": [
-        "electron microscope", "resolution", "electron beam", "microscope",
-    ],
-    # --- Grade 8 ---
-    "G8_S1_BIO_DIVER": [
-        "biodiversity", "diversity", "microorganism", "micro-organism", "species",
-    ],
-    "G8_S1_BIO_CLASSIF": [
-        "binomial", "nomenclature", "taxonomy", "classification framework",
-        "scientific name",
-    ],
-    "G8_S2_TIS_PLANT": [
-        "plant tissue", "meristematic", "permanent tissue", "xylem", "phloem",
-        "epidermis",
-    ],
-    "G8_S2_TIS_ANIMAL": [
-        "animal tissue", "epithelial", "connective", "muscular", "nervous tissue",
-    ],
-    "G8_S3_PHO_PROCESS": [
-        "photosynthesis", "chlorophyll", "carbon dioxide", "glucose", "starch",
-        "light energy",
-    ],
-    "G8_S3_PHO_IMPORT": [
-        "importance of photosynthesis", "food chain", "oxygen", "ecosystem",
-        "producers",
-    ],
-    "G8_S4_MAT_ELEMENTS": [
-        "element", "chemical symbol", "periodic table", "atom", "pure substance",
-    ],
-    "G8_S4_MAT_COMPOUNDS": [
-        "compound", "chemical compound", "mixture", "molecule", "formula",
-    ],
-    "G8_S5_MAT_DENSITY": [
-        "density", "mass per volume", "float", "sink", "relative density",
-    ],
-    "G8_S5_MAT_THERMAL": [
-        "thermal conductivity", "electrical conductivity", "insulator", "conductor",
-        "heat transfer",
-    ],
-    "G8_S6_CHA_PHYSICAL": [
-        "physical change", "reversible change", "state change", "no new substance",
-    ],
-    "G8_S6_CHA_BURNING": [
-        "combustion", "burning", "ignition", "bunsen burner", "flammable",
-        "fire triangle",
-    ],
-    "G8_S7_FOR_TYPES": [
-        "force", "gravitational", "magnetic", "friction", "contact force",
-        "non-contact",
-    ],
-    "G8_S7_FOR_PRESSURE": [
-        "pressure", "pascal", "force per area", "hydraulic", "atmospheric pressure",
-    ],
-    "G8_S8_STA_PHENOM": [
-        "electrostatic attraction", "electrostatic repulsion", "charged object",
-        "static discharge",
-    ],
-    "G8_S8_STA_LIGHTNG": [
-        "lightning", "thunderstorm", "earthing", "lightning conductor", "static",
-    ],
-    # --- Grade 9 ---
-    "G9_S1_SYS_DIGEST": [
-        "digestive", "digestion", "enzyme", "stomach", "intestine", "oesophagus",
-        "nutrient absorption",
-    ],
-    "G9_S1_SYS_CIRCUL": [
-        "circulatory", "respiratory", "excretory", "heart", "blood", "lung",
-        "kidney", "circulation",
-    ],
-    "G9_S2_RHY_EARTH": [
-        "rotation", "revolution", "day and night", "seasons", "rhythmic",
-        "earth cycle",
-    ],
-    "G9_S2_RHY_CLIMATE": [
-        "climate", "monsoon", "ecosystem cycle", "rhythmic phenomenon",
-        "weather pattern",
-    ],
-    "G9_S3_LIG_REFRAC": [
-        "refraction", "refractive index", "critical angle", "total internal reflection",
-        "bending of light",
-    ],
-    "G9_S3_LIG_LENSES": [
-        "convex lens", "concave lens", "real image", "virtual image", "focal length",
-        "magnification",
-    ],
-    "G9_S4_SOU_PROPAG": [
-        "sound", "frequency", "amplitude", "wavelength", "propagation", "medium",
-        "vibration",
-    ],
-    "G9_S4_SOU_HEARING": [
-        "ear", "hearing", "auditory", "eardrum", "cochlea", "decibel", "ultrasound",
-    ],
-    "G9_S5_HEA_EXPANS": [
-        "thermal expansion", "expand", "contract", "bimetallic", "gaps in railway",
-    ],
-    "G9_S5_HEA_TRANSF": [
-        "conduction", "convection", "radiation", "heat transfer", "thermal physics",
-    ],
-    "G9_S6_NAT_ATOMS": [
-        "atomic model", "subatomic", "proton", "neutron", "electron", "atomic number",
-        "nucleus",
-    ],
-    "G9_S6_NAT_CONFIG": [
-        "electronic configuration", "electron shell", "valence", "periodic table group",
-    ],
-    "G9_S7_ACI_SALTS": [
-        "salt", "acid", "base", "indicator", "salt preparation", "neutralisation",
-    ],
-    "G9_S7_ACI_NEUTRAL": [
-        "neutralization", "neutralisation", "antacid", "agricultural lime",
-        "industrial acid",
-    ],
-}
+# Re-export for modules that import keyword maps from knowledge_base.
+_TOPIC_KEYWORDS = TOPIC_KEYWORDS
+_TOPIC_QUERY_BOOST = TOPIC_QUERY_BOOST
 
-_TOPIC_QUERY_BOOST: dict[str, str] = {
-    # Grade 6
-    "G6_S1_ORG_CLASS": "Organisation of living things: classification and grouping organisms.",
-    "G6_S1_ORG_CHARS": "Characteristics of living things and life processes.",
-    "G6_S2_MAT_PROPS": "Physical and chemical properties of matter.",
-    "G6_S2_MAT_STATES": "States of matter, particles, and changes of state.",
-    "G6_S4_ENE_SOURCES": "Energy types and energy sources including renewable and non-renewable.",
-    "G6_S8_ELE_CIRCUITS": "Electric circuits, current, switches, cells, and lamps.",
-    "G6_S8_ELE_CONDINS": "Conductors and insulators in electricity.",
-    # Grade 7
-    "G7_S1_PLA_DIVER": "Morphological features and diversity of plants.",
-    "G7_S1_PLA_CLASSIF": "Plant classification: monocots versus dicots.",
-    "G7_S2_STA_CHARGES": "Charging objects and static electric charges.",
-    "G7_S2_STA_CAPACIT": "Capacitors and static electricity applications.",
-    "G7_S3_ELE_SOURCES": "Sources of electricity generation.",
-    "G7_S3_ELE_CURRENTS": "Electric currents: direct current versus alternating current.",
-    "G7_S4_WAT_SOLVENT": "Water as a universal solvent.",
-    "G7_S4_WAT_COOLANT": "Water as a coolant and thermal properties.",
-    "G7_S5_ACI_IDENTIF": "Identification of acids and bases.",
-    "G7_S5_ACI_INDICAT": "pH indicators and neutralization.",
-    "G7_S6_ANI_CLASSIF": "Vertebrates, invertebrates, and dichotomous keys.",
-    "G7_S6_ANI_ADAPTAT": "Animal adaptations to environments.",
-    "G7_S7_ENE_FORMS": "Forms of energy: kinetic, potential, thermal, chemical.",
-    "G7_S7_ENE_TRANSF": "Energy transformation and transfer.",
-    "G7_S8_EAR_STRUCT": "Earth's internal structure and layers.",
-    "G7_S8_EAR_TECTON": "Tectonic plates and plate movements.",
-    "G7_S9_LIG_SHADOWS": "Formation of shadows: umbra and penumbra.",
-    "G7_S9_LIG_MIRRORS": "Light reflection on plane and curved mirrors.",
-    "G7_S10_MIC_LIGHT": "Compound light microscope structure and magnification.",
-    "G7_S10_MIC_ELECTR": "Electron microscope resolution and characteristics.",
-    # Grade 8
-    "G8_S1_BIO_DIVER": "Diversity of microorganisms, plants, and animals.",
-    "G8_S1_BIO_CLASSIF": "Classification frameworks and binomial nomenclature.",
-    "G8_S2_TIS_PLANT": "Plant tissues: meristematic and permanent.",
-    "G8_S2_TIS_ANIMAL": "Animal tissues: epithelial, connective, muscular, nervous.",
-    "G8_S3_PHO_PROCESS": "Photosynthesis mechanism and raw materials.",
-    "G8_S3_PHO_IMPORT": "Importance of photosynthesis to ecosystems.",
-    "G8_S4_MAT_ELEMENTS": "Characteristics of elements and chemical symbols.",
-    "G8_S4_MAT_COMPOUNDS": "Formation of compounds and chemical mixtures.",
-    "G8_S5_MAT_DENSITY": "Density principles, measurement, and calculations.",
-    "G8_S5_MAT_THERMAL": "Thermal and electrical conductivity of matter.",
-    "G8_S6_CHA_PHYSICAL": "Physical versus chemical changes in matter.",
-    "G8_S6_CHA_BURNING": "Combustion, ignition temperature, and burning.",
-    "G8_S7_FOR_TYPES": "Contact and non-contact forces.",
-    "G8_S7_FOR_PRESSURE": "Pressure calculation and applications.",
-    "G8_S8_STA_PHENOM": "Electrostatic attraction and repulsion.",
-    "G8_S8_STA_LIGHTNG": "Thunderstorms, static discharge, and lightning protection.",
-    # Grade 9
-    "G9_S1_SYS_DIGEST": "Human digestive system and digestion enzymes.",
-    "G9_S1_SYS_CIRCUL": "Circulatory, respiratory, and excretory coordination.",
-    "G9_S2_RHY_EARTH": "Rhythmic cycles from Earth's rotation and revolution.",
-    "G9_S2_RHY_CLIMATE": "Rhythmic phenomena, ecosystems, and climate.",
-    "G9_S3_LIG_REFRAC": "Refraction, critical angle, and total internal reflection.",
-    "G9_S3_LIG_LENSES": "Convex and concave lenses; real and virtual images.",
-    "G9_S4_SOU_PROPAG": "Sound frequency, amplitude, and propagation.",
-    "G9_S4_SOU_HEARING": "Human ear anatomy and hearing.",
-    "G9_S5_HEA_EXPANS": "Thermal expansion of solids, liquids, and gases.",
-    "G9_S5_HEA_TRANSF": "Heat transfer: conduction, convection, radiation.",
-    "G9_S6_NAT_ATOMS": "Atomic models, subatomic particles, atomic number.",
-    "G9_S6_NAT_CONFIG": "Electronic configuration and periodic table grouping.",
-    "G9_S7_ACI_SALTS": "Acids, bases, indicators, and salt preparation.",
-    "G9_S7_ACI_NEUTRAL": "Neutralization applications in industry and agriculture.",
-}
+
+def _resolve_pdf_specs() -> list[tuple[Path, int]]:
+    specs = [(p, g) for p, g in _SYLLABUS_PDF_SPECS if p.is_file()]
+    if specs:
+        return specs
+    legacy = [(p, g) for p, g in _LEGACY_PDF_SPECS if p.is_file()]
+    if legacy:
+        return legacy
+    raise FileNotFoundError(
+        "No syllabus PDFs found under Data/Syllabi (Grade folders or root copies)."
+    )
 
 
 def _grade_from_topic_id(topic_id: str) -> Optional[int]:
@@ -383,8 +133,11 @@ class LocalScienceKnowledgeBase:
         persist_directory: Optional[Path | str] = None,
     ) -> None:
         self.base_dir = PROJECT_ROOT
-        raw_specs = pdf_specs or _SYLLABUS_PDF_SPECS
-        self.pdf_specs = [(Path(p), int(g)) for p, g in raw_specs]
+        if pdf_specs is None:
+            raw_specs = _resolve_pdf_specs()
+        else:
+            raw_specs = [(Path(p), int(g)) for p, g in pdf_specs]
+        self.pdf_specs = raw_specs
         self.persist_directory = Path(persist_directory) if persist_directory else _CHROMA_DIR
         self._chroma_client: Any = None
         self._collection: Any = None
@@ -427,6 +180,8 @@ class LocalScienceKnowledgeBase:
         from langchain_community.document_loaders import PyPDFLoader
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+        if not self.pdf_specs:
+            raise FileNotFoundError("No syllabus PDF specs configured.")
         for pdf_path, _grade in self.pdf_specs:
             if not pdf_path.is_file():
                 raise FileNotFoundError(f"Syllabus PDF not found: {pdf_path}")
@@ -461,6 +216,7 @@ class LocalScienceKnowledgeBase:
                 doc.metadata["source_pdf"] = pdf_path.name
                 doc.metadata["grade"] = grade
             all_splits.extend(splits)
+            print(f"  chunked {pdf_path.name}: {len(splits)} chunks (grade {grade})")
 
         client = chromadb.PersistentClient(path=str(self.persist_directory))
         try:
@@ -487,6 +243,7 @@ class LocalScienceKnowledgeBase:
 
         self._chroma_client = client
         self._collection = col
+        print(f"Indexed {len(ids)} chunks from {len(self.pdf_specs)} PDFs -> {self.persist_directory}")
 
     def _ensure_collection_loaded(self) -> Any:
         if not self._index_ready():
@@ -497,14 +254,12 @@ class LocalScienceKnowledgeBase:
 
     def ensure_index(self, force_rebuild: bool = False) -> None:
         if force_rebuild or not self._index_ready():
-            self.build_index(force_rebuild=force_rebuild)
-        self._ensure_collection_loaded()
+            self.build_index(force_rebuild=True)
 
     def retrieve_context(self, topic_id: str, k: int = 5) -> dict[str, Any]:
         """Return syllabus excerpts for a curriculum topic_id (metadata-filtered when possible)."""
-        self.ensure_index()
+        topic_id = normalize_topic_id(topic_id)
         col = self._ensure_collection_loaded()
-
         grade = _grade_from_topic_id(topic_id)
         boost = _TOPIC_QUERY_BOOST.get(
             topic_id,
@@ -512,51 +267,46 @@ class LocalScienceKnowledgeBase:
         )
         query = f"{topic_id} {boost}"
 
-        def _rows_from_chroma_result(res: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-            docs_batch = (res.get("documents") or [[]])[0] or []
-            metas_batch = (res.get("metadatas") or [[]])[0] or []
-            rows: list[tuple[str, dict[str, Any]]] = []
-            for i, text in enumerate(docs_batch):
-                meta = metas_batch[i] if i < len(metas_batch) else {}
-                rows.append((text, dict(meta) if isinstance(meta, dict) else {}))
-            return rows
-
-        def _topic_where() -> dict[str, Any]:
+        def _where_filter() -> Optional[dict[str, Any]]:
             if grade is not None:
                 return {"$and": [{"topic_id_primary": topic_id}, {"grade": grade}]}
             return {"topic_id_primary": topic_id}
 
-        filtered_rows: list[tuple[str, dict[str, Any]]] = []
         try:
-            fr = col.query(
+            res = col.query(
                 query_texts=[query],
-                n_results=k,
-                where=_topic_where(),
+                n_results=max(k * 3, 8),
+                where=_where_filter(),
             )
-            filtered_rows = _rows_from_chroma_result(fr)
         except Exception:
-            filtered_rows = []
+            res = col.query(query_texts=[query], n_results=max(k * 3, 8))
 
-        if len(filtered_rows) < max(2, k // 2):
-            broad_where: Optional[dict[str, Any]] = {"grade": grade} if grade is not None else None
+        docs = (res.get("documents") or [[]])[0]
+        metas = (res.get("metadatas") or [[]])[0]
+        filtered_rows: list[tuple[str, dict[str, Any]]] = []
+        for text, meta in zip(docs, metas):
+            filtered_rows.append((text or "", dict(meta or {})))
+
+        if not filtered_rows and grade is not None:
             try:
-                br = col.query(
+                res2 = col.query(
                     query_texts=[query],
-                    n_results=k,
-                    where=broad_where,
+                    n_results=max(k * 3, 8),
+                    where={"grade": grade},
                 )
+                docs2 = (res2.get("documents") or [[]])[0]
+                metas2 = (res2.get("metadatas") or [[]])[0]
+                for text, meta in zip(docs2, metas2):
+                    filtered_rows.append((text or "", dict(meta or {})))
             except Exception:
-                br = col.query(query_texts=[query], n_results=k)
-            broad_rows = _rows_from_chroma_result(br)
-            seen = {t for t, _ in filtered_rows}
-            for text, meta in broad_rows:
-                if text not in seen:
-                    filtered_rows.append((text, meta))
-                    seen.add(text)
-                if len(filtered_rows) >= k:
-                    break
-        else:
-            filtered_rows = filtered_rows[:k]
+                pass
+
+        if not filtered_rows:
+            res3 = col.query(query_texts=[query], n_results=k)
+            docs3 = (res3.get("documents") or [[]])[0]
+            metas3 = (res3.get("metadatas") or [[]])[0]
+            for text, meta in zip(docs3, metas3):
+                filtered_rows.append((text or "", dict(meta or {})))
 
         contexts: list[dict[str, Any]] = []
         for rank, (page_content, doc_meta) in enumerate(filtered_rows[:k], start=1):
@@ -589,7 +339,7 @@ def get_knowledge_base() -> LocalScienceKnowledgeBase:
 
 def retrieve_context(topic_id: str, *, k: int = 5) -> dict[str, Any]:
     """Module-level helper; builds index on first use if `.chroma_science_g6_g9` is missing."""
-    return get_knowledge_base().retrieve_context(topic_id, k=k)
+    return get_knowledge_base().retrieve_context(normalize_topic_id(topic_id), k=k)
 
 
 def main() -> None:
@@ -599,7 +349,7 @@ def main() -> None:
         "--topic",
         type=str,
         default=None,
-        help="If set, run retrieve_context(topic) after build (e.g. G8_S3_PHO_PROCESS).",
+        help="If set, run retrieve_context(topic) after build (e.g. G8_C11_PHO_PROCESS).",
     )
     args = parser.parse_args()
     kb = LocalScienceKnowledgeBase()
@@ -609,6 +359,8 @@ def main() -> None:
         out = kb.retrieve_context(args.topic, k=4)
         print("--- sample facts_text (truncated) ---")
         print(out["facts_text"][:1500] + ("..." if len(out["facts_text"]) > 1500 else ""))
+    else:
+        print(f"Fallback topic: {FALLBACK_TOPIC_ID}")
 
 
 if __name__ == "__main__":

@@ -145,19 +145,36 @@ def _read_topic_ids_from_xlsx_zip(xlsx_path: Path) -> list[str]:
 
 def load_topic_ids(base_dir: Path) -> list[str]:
     """Load topic IDs from the merged G6–G9 hierarchy (or legacy files)."""
-    merged_xlsx = base_dir / "Skill-Heirarchies-G6-G9.xlsx"
-    csv_path = base_dir / "Skill-Heirarchies.csv"
-    legacy_xlsx = base_dir / "Skill-Heirarchies.xlsx"
-
-    if merged_xlsx.exists():
-        return read_topic_ids_from_xlsx(merged_xlsx)
-    if csv_path.exists():
-        return read_topic_ids_from_csv(csv_path)
-    if legacy_xlsx.exists():
-        return read_topic_ids_from_xlsx(legacy_xlsx)
+    candidates = [
+        base_dir / "Skill-Heirarchies-G6-G9-Full-Chapters.xlsx",
+        base_dir / "Skill-Heirarchies-G6-G9-UPDATED.xlsx",
+        base_dir / "Skill-Heirarchies-G6-G9.xlsx",
+        base_dir / "Skill-Heirarchies.csv",
+        base_dir / "Skill-Heirarchies.xlsx",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        if path.suffix.lower() == ".csv":
+            return read_topic_ids_from_csv(path)
+        ids = read_topic_ids_from_xlsx(path)
+        # Prefer files that include the new chapter-based IDs.
+        if any("_C" in tid for tid in ids):
+            return ids
+        if path.name == "Skill-Heirarchies-G6-G9.xlsx" and not any(
+            p.exists() for p in candidates[:2]
+        ):
+            return ids
+        if path.name.endswith("Full-Chapters.xlsx") or path.name.endswith("UPDATED.xlsx"):
+            return ids
+    for path in candidates:
+        if path.exists():
+            if path.suffix.lower() == ".csv":
+                return read_topic_ids_from_csv(path)
+            return read_topic_ids_from_xlsx(path)
 
     raise FileNotFoundError(
-        "Could not find Skill-Heirarchies-G6-G9.xlsx (or legacy hierarchy files) in Data/."
+        "Could not find Skill-Heirarchies-G6-G9-Full-Chapters.xlsx (or fallback hierarchy files) in Data/."
     )
 
 

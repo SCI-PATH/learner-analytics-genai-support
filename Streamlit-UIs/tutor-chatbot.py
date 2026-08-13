@@ -167,8 +167,8 @@ def main() -> None:
         resolved_topic = st.session_state.latest_topic
         persona = st.session_state.latest_persona
 
-        if mastery is None:
-            st.info("Send a message to see mastery for the detected lesson.")
+        if mastery is None or not resolved_topic:
+            st.info("No lesson yet. Ask a science question to detect a topic and show BKT mastery.")
         else:
             st.metric("BKT Mastery (current lesson)", f"{float(mastery):.4f}")
             st.write(f"Detected topic: `{resolved_topic}`")
@@ -238,18 +238,20 @@ def main() -> None:
                 st.session_state.last_tutor_debug = {"success": False, "error": err}
             else:
                 assistant_text = response.get("hint_text", "(No hint returned)")
-                st.session_state.latest_mastery = response.get("mastery_probability")
-                st.session_state.latest_mode = response.get("hint_mode")
-                st.session_state.latest_persona = (
-                    response.get("persona_label")
-                    or response.get("persona_id")
-                    or "unknown"
-                )
-                st.session_state.latest_topic = (
-                    response.get("topic_id_resolved")
-                    or response.get("topic_id")
-                    or "unknown"
-                )
+                intent = response.get("conversation_intent")
+                resolved = response.get("topic_id_resolved") or response.get("topic_id")
+                if intent == "greeting" or not resolved:
+                    # Greetings must not invent a fallback lesson in the sidebar.
+                    pass
+                else:
+                    st.session_state.latest_mastery = response.get("mastery_probability")
+                    st.session_state.latest_mode = response.get("hint_mode")
+                    st.session_state.latest_persona = (
+                        response.get("persona_label")
+                        or response.get("persona_id")
+                        or "unknown"
+                    )
+                    st.session_state.latest_topic = resolved
                 st.session_state.last_tutor_debug = {
                     "success": True,
                     "topic_id_resolved": response.get("topic_id_resolved"),
@@ -267,6 +269,7 @@ def main() -> None:
                     "updated_mastery_probability": response.get("updated_mastery_probability"),
                     "mastery_probability": response.get("mastery_probability"),
                     "risk_flag": response.get("risk_flag"),
+                    "conversation_intent": response.get("conversation_intent"),
                 }
 
         st.session_state.messages.append({"role": "assistant", "content": assistant_text})

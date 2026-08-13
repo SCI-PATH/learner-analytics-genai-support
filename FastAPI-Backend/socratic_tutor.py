@@ -44,6 +44,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from bkt_engine import ScienceBKT
+from curriculum_topics import FALLBACK_TOPIC_ID, normalize_topic_id
 from knowledge_base import _TOPIC_KEYWORDS, _TOPIC_QUERY_BOOST, retrieve_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -302,14 +303,15 @@ _CHAT_FRUSTRATION_PHRASES: tuple[str, ...] = (
 
 # Extra student phrasing aliases layered on top of syllabus keywords (all grades).
 _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
-    "G6_S1_ORG_CHARS": [
+    "G6_C1_ORG_CHARS": [
         "living thing", "non living", "alive", "not alive", "grow", "breathe",
         "reproduce", "reproduction", "respond", "sensitive",
     ],
-    "G7_S1_PLA_CLASSIF": ["monocot", "dicot", "monocots", "dicots"],
-    "G8_S3_PHO_PROCESS": ["photosynthesis", "chlorophyll", "glucose"],
-    "G9_S3_LIG_REFRAC": ["refraction", "refract", "critical angle"],
-    "G9_S4_SOU_PROPAG": ["sound wave", "frequency", "amplitude", "pitch"],
+    "G7_C1_PLA_CLASSIF": ["monocot", "dicot", "monocots", "dicots"],
+    "G8_C11_PHO_PROCESS": ["photosynthesis", "chlorophyll", "glucose"],
+    "G9_C14_WAV_REFRACT": ["refraction", "refract", "critical angle"],
+    "G7_C11_SOU_PROPAG": ["sound wave", "frequency", "amplitude", "pitch"],
+    "G6_C8_ELE_CONDINS": ["conductor", "insulator", "rubber wire"],
 }
 
 
@@ -769,6 +771,54 @@ _ACKNOWLEDGMENT_CLOSURES: dict[str, str] = {
     ),
 }
 
+# Opening greetings (new chat "Hi") — not science questions and not wrap-up thanks.
+_GREETING_PATTERN = re.compile(
+    r"^(?:"
+    r"(?:hi+|hello+|hey+|heya+|hiya+|howdy+|yo)"
+    r"(?:\s+(?:there|again|tutor|teacher|bot|everyone))?"
+    r"|"
+    r"good\s+(?:morning|afternoon|evening|day)"
+    r"|"
+    r"how\s+are\s+you(?:\s+doing)?"
+    r"|"
+    r"how(?:'s|s|\s+is)\s+it\s+going"
+    r"|"
+    r"what(?:'s|s|\s+is)\s+up"
+    r")[\s!.?,]*$",
+    re.IGNORECASE,
+)
+
+_GREETING_OPENERS: dict[str, str] = {
+    "practical_encourager": (
+        "Hi! I'm your science tutor for Grades 6–9. "
+        "How can I help you today — what topic would you like to work on?"
+    ),
+    "analytical_coach": (
+        "Hello. I can walk you through any Grade 6–9 science concept step by step. "
+        "Which topic should we start with?"
+    ),
+    "curious_explorer": (
+        "Hey! Ready to investigate a science idea? "
+        "What topic can I help you with?"
+    ),
+}
+
+
+def _is_greeting_intent(student_answer: str) -> bool:
+    """True for short standalone greetings like Hi / Hello, not science questions."""
+    text = (student_answer or "").strip()
+    if not text:
+        return False
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    if not words or len(words) > 8:
+        return False
+    if "?" in text and not _GREETING_PATTERN.fullmatch(text.strip()):
+        # "Hi, what is a conductor?" is a real question.
+        residual = _GREETING_PATTERN.sub(" ", text.lower())
+        if _ACK_RESIDUAL_SCIENCE_HINT.search(residual):
+            return False
+    return bool(_GREETING_PATTERN.fullmatch(text.strip()))
+
 
 def _is_acknowledgment_intent(student_answer: str) -> bool:
     """
@@ -861,6 +911,54 @@ def _acknowledgment_closure_response(
         "topic_id_inferred": topic_id_inferred,
         "topic_id_resolved": str(topic_id),
         "topic_changed": topic_changed,
+        "history_turns_sent": 0,
+    }
+
+
+def _greeting_opener_response(
+    *,
+    user_id: str,
+    persona_id: Optional[str],
+    bkt: Optional[ScienceBKT] = None,
+) -> dict[str, Any]:
+    """Invite the student to name a science topic; skip RAG / LLM / BKT / topic routing."""
+    resolved_persona = _resolve_persona_id(persona_id, user_id)
+    persona_label = _PERSONA_LABELS[resolved_persona]
+    return {
+        "success": True,
+        "user_id": str(user_id),
+        "topic_id": None,
+        "mastery_probability": None,
+        "mastery_probability_before": None,
+        "updated_mastery_probability": None,
+        "hint_mode": None,
+        "persona_id": resolved_persona,
+        "persona_label": persona_label,
+        "hint_text": _GREETING_OPENERS.get(
+            resolved_persona,
+            _GREETING_OPENERS["practical_encourager"],
+        ),
+        "interaction_score": None,
+        "interaction_score_effective": None,
+        "bkt_updated": False,
+        "bkt_observation_label": None,
+        "tutor_bkt_policy": _tutor_bkt_policy(),
+        "bkt_update_note": "greeting_intent_opener_no_bkt",
+        "risk_flag": False,
+        "retrieval": {
+            "chunks_returned": 0,
+            "query_used": None,
+            "skipped": True,
+            "skip_reason": "greeting_intent",
+        },
+        "frustration_level_used": None,
+        "frustration_score_used": None,
+        "llm_model": None,
+        "conversation_intent": "greeting",
+        "socratic_loop_bypassed": True,
+        "topic_id_inferred": False,
+        "topic_id_resolved": None,
+        "topic_changed": False,
         "history_turns_sent": 0,
     }
 
@@ -1115,7 +1213,7 @@ def infer_topic_id_from_question(
     student_answer: str,
     *,
     conversation_history: Optional[list[dict[str, Any]]] = None,
-    fallback_topic_id: str = "G6_S1_ORG_CHARS",
+    fallback_topic_id: str = FALLBACK_TOPIC_ID,
 ) -> str:
     """
     Infer topic_id from natural language using the expanded ``_TOPIC_KEYWORDS`` catalog.
@@ -1180,6 +1278,13 @@ def generate_socratic_hint(
     # before retrieval and model calls.
     load_dotenv(_ENV_PATH)
 
+    if _is_greeting_intent(student_answer):
+        return _greeting_opener_response(
+            user_id=user_id,
+            persona_id=persona_id,
+            bkt=bkt,
+        )
+
     if _is_acknowledgment_intent(student_answer):
         return _acknowledgment_closure_response(
             user_id=user_id,
@@ -1190,6 +1295,7 @@ def generate_socratic_hint(
             topic_changed=False,
         )
 
+    topic_id = normalize_topic_id(topic_id)
     engine = bkt or _get_default_bkt()
     mastery_before = float(engine.get_current_mastery_probability(user_id, topic_id))
     kb = retrieve_context(topic_id, k=context_k)
@@ -1379,13 +1485,21 @@ def generate_socratic_hint_auto_topic(
     If topic_id is omitted, infer it from question keywords each turn.
     When the inferred topic changes, prior chat history is not sent to the LLM.
 
-    Acknowledgment / gratitude messages short-circuit before topic inference and RAG.
+    Acknowledgment / gratitude and standalone greetings short-circuit before
+    topic inference and RAG.
     """
+    if _is_greeting_intent(student_answer):
+        return _greeting_opener_response(
+            user_id=user_id,
+            persona_id=persona_id,
+            bkt=bkt,
+        )
+
     if _is_acknowledgment_intent(student_answer):
         sticky_topic = (
             topic_id
             or _last_resolved_topic_by_user.get(str(user_id))
-            or "G6_S1_ORG_CHARS"
+            or FALLBACK_TOPIC_ID
         )
         return _acknowledgment_closure_response(
             user_id=user_id,

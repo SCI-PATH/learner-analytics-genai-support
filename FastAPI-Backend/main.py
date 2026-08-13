@@ -22,7 +22,7 @@ import sqlite3
 from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Path as ApiPath
 import pandas as pd
 from pydantic import BaseModel, Field
 
@@ -40,10 +40,27 @@ from socratic_tutor import (
 app = FastAPI(
     title="Socratic Tutor API",
     description=(
-        "Single BKT engine: assessment submits verified labels; tutor hints may "
-        "dialogue-driven BKT: strict/quiz_only/legacy via TUTOR_BKT_POLICY env."
+        "Component 4 — Learner Profile Analytics & GenAI Support.\n\n"
+        "**Question Engine / Content Gen (read mastery):** "
+        "`GET /api/v1/mastery/{user_id}/{topic_id}` returns current BKT P(L) and "
+        "`mastery_category` (`basic` / `intermediate` / `advanced`) without recording an attempt.\n\n"
+        "**Question Engine (write attempt):** `POST /api/v1/assessment-submit` records a scored "
+        "quiz item, updates BKT, and returns the new P(L) + category.\n\n"
+        "Interactive docs: `/docs` (Swagger) and `/redoc`."
     ),
     version="0.1.0",
+    openapi_tags=[
+        {
+            "name": "Mastery",
+            "description": (
+                "Read or update BKT mastery. Teammates who only need the current score "
+                "and learner category should call **GET /api/v1/mastery/{user_id}/{topic_id}**."
+            ),
+        },
+        {"name": "Tutor", "description": "Socratic chatbot hint endpoints."},
+        {"name": "Engagement", "description": "Frustration cues from Component 3."},
+        {"name": "Analytics", "description": "Teacher dashboard: matrix, at-risk, student profile."},
+    ],
 )
 
 # Lightweight in-memory analytics signals for at-risk trend checks.
@@ -54,88 +71,51 @@ _chat_history_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: de
 _assessment_attempts_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=500))
 QuestionType = Literal["MCQ", "SHORT_ANSWER"]
 DistractorTag = Literal["NEAR_MISS", "MISCONCEPTION", "COMPLETE_MISS"]
+MasteryCategory = Literal["basic", "intermediate", "advanced"]
 _SLIP_HIGH_THRESHOLD = 0.15
 _MASTERY_LOW_THRESHOLD = 0.45
 _MASTERY_CRITICAL_THRESHOLD = 0.20
+# Shared bands for tutor hint mode, dashboard heatmap, and teammate DDA.
+_MASTERY_BASIC_MAX = 0.50
+_MASTERY_ADVANCED_MIN = 0.80
+
+
+def _mastery_category_from_pl(mastery: float) -> MasteryCategory:
+    """Map BKT P(L) to a learner category for this (user, topic)."""
+    p = float(mastery)
+    if p < _MASTERY_BASIC_MAX:
+        return "basic"
+    if p >= _MASTERY_ADVANCED_MIN:
+        return "advanced"
+    return "intermediate"
+
+
+def _mastery_category_payload(mastery: float) -> dict[str, Any]:
+    return {
+        "mastery_category": _mastery_category_from_pl(mastery),
+        "mastery_category_thresholds": {
+            "basic": f"P(L) < {_MASTERY_BASIC_MAX:.2f}",
+            "intermediate": f"{_MASTERY_BASIC_MAX:.2f} <= P(L) < {_MASTERY_ADVANCED_MIN:.2f}",
+            "advanced": f"P(L) >= {_MASTERY_ADVANCED_MIN:.2f}",
+        },
+    }
 _replay_engine_cache: Optional[ScienceBKT] = None
 _mastery_matrix_cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], dict[str, dict[str, float | None]]] = {}
 _MASTER_MATRIX_CACHE_MAX = 32
 _LIVE_STATE_DB = PROJECT_ROOT / "live_state_events.db"
 _INTERACTION_LOG_PATH = PROJECT_ROOT / "interaction_logs.json"
-_DISTRACTOR_TAGS_BY_TOPIC: dict[str, list[str]] = {
-    "G6_S1_ORG_CHARS": [
-        "Confused living vs non-living",
-        "Missed growth/reproduction criterion",
-        "Mixed up nutrition with movement",
-    ],
-    "G6_S1_ORG_CLASS": [
-        "Confused vertebrate vs invertebrate",
-        "Misclassified plant groups",
-        "Mixed habitat with classification",
-    ],
-    "G6_S2_MAT_PROPS": [
-        "Confused hardness vs strength",
-        "Mixed conductivity with transparency",
-        "Misread absorbency clue",
-    ],
-    "G6_S2_MAT_STATES": [
-        "Confused melting vs dissolving",
-        "Mixed evaporation with boiling",
-        "State-change temperature misunderstanding",
-    ],
-    "G6_S4_ENE_SOURCES": [
-        "Mixed renewable vs non-renewable",
-        "Confused source with energy form",
-        "Misread conservation scenario",
-    ],
-    "G6_S8_ELE_CIRCUITS": [
-        "Confused series vs parallel",
-        "Current path misconception",
-        "Battery polarity misunderstanding",
-    ],
-    "G6_S8_ELE_CONDINS": [
-        "Confused conductor vs insulator",
-        "Material property overgeneralization",
-        "Assumed all metals/plastics behave same",
-    ],
-}
-
-# Grade 7–9 placeholder distractor tags (profile analytics; extend as rubrics mature).
-_G7_G9_TOPIC_IDS: list[str] = [
-    "G7_S1_PLA_DIVER", "G7_S1_PLA_CLASSIF", "G7_S2_STA_CHARGES", "G7_S2_STA_CAPACIT",
-    "G7_S3_ELE_SOURCES", "G7_S3_ELE_CURRENTS", "G7_S4_WAT_SOLVENT", "G7_S4_WAT_COOLANT",
-    "G7_S5_ACI_IDENTIF", "G7_S5_ACI_INDICAT", "G7_S6_ANI_CLASSIF", "G7_S6_ANI_ADAPTAT",
-    "G7_S7_ENE_FORMS", "G7_S7_ENE_TRANSF", "G7_S8_EAR_STRUCT", "G7_S8_EAR_TECTON",
-    "G7_S9_LIG_SHADOWS", "G7_S9_LIG_MIRRORS", "G7_S10_MIC_LIGHT", "G7_S10_MIC_ELECTR",
-    "G8_S1_BIO_DIVER", "G8_S1_BIO_CLASSIF", "G8_S2_TIS_PLANT", "G8_S2_TIS_ANIMAL",
-    "G8_S3_PHO_PROCESS", "G8_S3_PHO_IMPORT", "G8_S4_MAT_ELEMENTS", "G8_S4_MAT_COMPOUNDS",
-    "G8_S5_MAT_DENSITY", "G8_S5_MAT_THERMAL", "G8_S6_CHA_PHYSICAL", "G8_S6_CHA_BURNING",
-    "G8_S7_FOR_TYPES", "G8_S7_FOR_PRESSURE", "G8_S8_STA_PHENOM", "G8_S8_STA_LIGHTNG",
-    "G9_S1_SYS_DIGEST", "G9_S1_SYS_CIRCUL", "G9_S2_RHY_EARTH", "G9_S2_RHY_CLIMATE",
-    "G9_S3_LIG_REFRAC", "G9_S3_LIG_LENSES", "G9_S4_SOU_PROPAG", "G9_S4_SOU_HEARING",
-    "G9_S5_HEA_EXPANS", "G9_S5_HEA_TRANSF", "G9_S6_NAT_ATOMS", "G9_S6_NAT_CONFIG",
-    "G9_S7_ACI_SALTS", "G9_S7_ACI_NEUTRAL",
-]
-for _tid in _G7_G9_TOPIC_IDS:
-    _DISTRACTOR_TAGS_BY_TOPIC.setdefault(
-        _tid,
-        [
-            f"Misconception on {_tid}",
-            "Partial understanding of key concept",
-            "General science reasoning error",
-        ],
-    )
+_DISTRACTOR_TAGS_BY_TOPIC: dict[str, list[str]] = {}
 
 
 def _distractor_tags_for_topic(topic_id: str) -> list[str]:
-    return _DISTRACTOR_TAGS_BY_TOPIC.get(
-        str(topic_id),
-        [
-            "General misconception",
-            "Incomplete conceptual understanding",
-            "Misapplied science rule",
-        ],
-    )
+    tid = str(topic_id)
+    if tid in _DISTRACTOR_TAGS_BY_TOPIC:
+        return _DISTRACTOR_TAGS_BY_TOPIC[tid]
+    return [
+        f"Misconception related to {tid}",
+        "Partial understanding of key concept",
+        "Misapplied science rule",
+    ]
 
 
 def _append_signal(user_id: str, topic_id: str, value: float) -> None:
@@ -388,6 +368,7 @@ def _normalize_assessment_attempt(payload: dict[str, Any]) -> dict[str, Any]:
         "chosen_distractor_text",
         "source",
         "updated_mastery_probability",
+        "mastery_category",
     )
     for key in optional_fields:
         if payload.get(key) is not None:
@@ -745,7 +726,7 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
     return result
 
 
-@app.post("/api/v1/assessment-submit")
+@app.post("/api/v1/assessment-submit", tags=["Mastery"])
 def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     """
     Record a **ground-truth** correct/incorrect outcome from the question engine.
@@ -755,9 +736,16 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     """
     engine = get_shared_bkt_engine()
     label = 1 if req.is_correct else 0
+    topic_id = str(req.topic_id)
+    try:
+        from curriculum_topics import normalize_topic_id
+
+        topic_id = normalize_topic_id(topic_id)
+    except Exception:
+        pass
     response_time_s = float(req.response_time_s) if req.response_time_s is not None else None
     try:
-        bkt_out = engine.predict_update(req.user_id, req.topic_id, label, response_time_s)
+        bkt_out = engine.predict_update(req.user_id, topic_id, label, response_time_s)
     except ValueError as exc:
         return {
             "success": False,
@@ -765,12 +753,13 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
             "topic_id": req.topic_id,
             "error": str(exc),
         }
-    mastery = float(engine.get_current_mastery_probability(req.user_id, req.topic_id))
-    _append_signal(req.user_id, req.topic_id, float(label))
+    mastery = float(engine.get_current_mastery_probability(req.user_id, topic_id))
+    category_fields = _mastery_category_payload(mastery)
+    _append_signal(req.user_id, topic_id, float(label))
     attempt_record = _record_assessment_attempt(
         {
             "user_id": str(req.user_id),
-            "topic_id": str(req.topic_id),
+            "topic_id": str(topic_id),
             "is_correct": bool(req.is_correct),
             "label": int(label),
             "question_type": req.question_type,
@@ -784,6 +773,7 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
             "chosen_distractor_text": req.chosen_distractor_text,
             "source": req.source,
             "updated_mastery_probability": mastery,
+            "mastery_category": category_fields["mastery_category"],
             "timestamp": datetime.now(UTC).isoformat(),
         }
     )
@@ -791,10 +781,11 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     return {
         "success": True,
         "user_id": req.user_id,
-        "topic_id": req.topic_id,
+        "topic_id": topic_id,
         "is_correct": bool(req.is_correct),
         "updated_mastery_probability": mastery,
         "mastery_probability": mastery,
+        **category_fields,
         "risk_flag": bool(bkt_out.get("at_risk")),
         "bkt_observation_label": label,
         "label_source": "assessment",
@@ -853,6 +844,73 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
         "decay_tau_seconds": 600,
         "effective_floor": 0.2,
         "used_by": ["/tutor/hint", "/tutor/hint-auto-topic"],
+    }
+
+
+@app.get(
+    "/api/v1/mastery/{user_id}/{topic_id}",
+    tags=["Mastery"],
+    summary="Get current BKT mastery + learner category (no new attempt)",
+    response_description="Current P(L) and mastery_category for this student × topic",
+)
+def get_current_mastery(
+    user_id: str = ApiPath(
+        ...,
+        description="Learner ID (same `user_id` used on assessment-submit and the tutor).",
+        example="student_001",
+    ),
+    topic_id: str = ApiPath(
+        ...,
+        description=(
+            "Canonical skill ID from Skill-Heirarchies-G6-G9-Full-Chapters.xlsx, "
+            "e.g. G6_C8_ELE_CONDINS."
+        ),
+        example="G6_C8_ELE_CONDINS",
+    ),
+) -> dict[str, Any]:
+    """
+    **Read-only** current mastery for one learner on one topic.
+
+    Use this when Question Engine or Content Generation needs:
+    - `mastery_probability` — BKT P(L) in [0, 1]
+    - `mastery_category` — `basic` | `intermediate` | `advanced`
+
+    Thresholds: basic &lt; 0.50, intermediate 0.50–0.79, advanced ≥ 0.80.
+
+    This does **not** record a quiz attempt. To *update* mastery after a scored
+    question, call `POST /api/v1/assessment-submit` instead.
+    """
+    try:
+        from curriculum_topics import normalize_topic_id
+
+        topic_id = normalize_topic_id(topic_id)
+    except Exception:
+        pass
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    if topic_id not in engine.skill_map:
+        return {
+            "success": False,
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "error": f"Unknown topic_id: {topic_id}",
+        }
+    mastery = float(engine.get_current_mastery_probability(str(user_id), topic_id))
+    state = engine.student_state.get((str(user_id), str(topic_id)), {})
+    return {
+        "success": True,
+        "user_id": str(user_id),
+        "topic_id": topic_id,
+        "mastery_probability": mastery,
+        **_mastery_category_payload(mastery),
+        "attempts": int(state.get("attempts", 0)),
+        "consecutive_incorrect": int(state.get("consecutive_incorrect", 0)),
+        "hint_mode": (
+            "scaffold"
+            if mastery < _MASTERY_BASIC_MAX
+            else ("nudge" if mastery >= _MASTERY_ADVANCED_MIN else "balanced")
+        ),
     }
 
 
@@ -1055,6 +1113,7 @@ def _build_replay_at_risk_alerts(
                 "student_id": uid,
                 "topic_id": current_topic,
                 "mastery_probability": round(mastery, 4),
+                "mastery_category": _mastery_category_from_pl(mastery),
                 "negative_velocity": bool(neg_velocity),
                 "recent_signal_tail": [round(v, 4) for v in tail],
                 "recent_performance_avg": (None if recent_perf is None else round(float(recent_perf), 4)),
@@ -1138,6 +1197,7 @@ def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> d
                     "student_id": uid,
                     "topic_id": current_topic,
                     "mastery_probability": round(mastery, 4),
+                    "mastery_category": _mastery_category_from_pl(mastery),
                     "negative_velocity": bool(neg_velocity),
                     "recent_signal_tail": list(_signal_history.get((uid, current_topic), []))[-3:],
                     "recent_performance_avg": (None if recent_avg is None else round(float(recent_avg), 4)),
@@ -1236,10 +1296,12 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
     bkt_parameters: list[dict[str, Any]] = []
     for topic_id in known_topics:
         params = engine.get_skill_parameters(topic_id)
+        p_l = float(engine.get_current_mastery_probability(str(user_id), topic_id))
         bkt_parameters.append(
             {
                 "topic_id": topic_id,
-                "p_l": float(engine.get_current_mastery_probability(str(user_id), topic_id)),
+                "p_l": p_l,
+                "mastery_category": _mastery_category_from_pl(p_l),
                 "p_g": float(params.get("guess", 0.0)),
                 "p_s": float(params.get("slip", 0.0)),
             }

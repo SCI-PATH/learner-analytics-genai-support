@@ -1161,6 +1161,65 @@ def _score_text_for_topic(text: str, topic_id: str) -> int:
     return score
 
 
+_TOPIC_SWITCH_INTENT_RE = re.compile(
+    r"(?:\?|^|\b)"
+    r"(?:what|why|how|when|where|which|who|explain|describe|teach|tell|"
+    r"can\s+you|could\s+you|i\s+want\s+to\s+(?:ask|know|learn)|"
+    r"(?:change|switch|move)\s+(?:the\s+)?topic|new\s+topic|what\s+about)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _rank_topics_for_text(text: str) -> list[tuple[str, int]]:
+    """Return curriculum topics ranked by evidence in the current learner message."""
+    normalized = re.sub(r"[^\w\s]", " ", str(text or "").strip().lower())
+    ranked = [
+        (topic_id, _score_text_for_topic(normalized, topic_id))
+        for topic_id in _TOPIC_KEYWORDS
+    ]
+    return sorted(ranked, key=lambda item: item[1], reverse=True)
+
+
+def _resolve_topic_for_turn(
+    user_id: str,
+    student_answer: str,
+    topic_id: Optional[str],
+    conversation_history: Optional[list[dict[str, Any]]],
+) -> tuple[str, Literal["explicit", "inferred", "continued", "switched"]]:
+    """
+    Resolve the lesson without allowing short Socratic answers to reroute the chat.
+
+    A supplied topic is authoritative. With prior conversation history, the last
+    resolved topic remains sticky unless the learner clearly asks a new,
+    confidently classifiable science question. An empty history starts a fresh
+    inference so user-level state does not permanently lock later conversations.
+    """
+    if topic_id:
+        return normalize_topic_id(topic_id), "explicit"
+
+    uid = str(user_id)
+    prior_topic = _last_resolved_topic_by_user.get(uid)
+    inferred_topic = infer_topic_id_from_question(
+        student_answer,
+        conversation_history=conversation_history,
+    )
+    if not prior_topic or not conversation_history:
+        return inferred_topic, "inferred"
+
+    ranked = _rank_topics_for_text(student_answer)
+    best_topic, best_score = ranked[0] if ranked else (inferred_topic, 0)
+    second_score = ranked[1][1] if len(ranked) > 1 else 0
+    has_switch_intent = bool(_TOPIC_SWITCH_INTENT_RE.search(student_answer))
+    confident_new_topic = (
+        best_topic != prior_topic
+        and best_score >= 3
+        and best_score - second_score >= 2
+    )
+    if has_switch_intent and confident_new_topic:
+        return best_topic, "switched"
+    return prior_topic, "continued"
+
+
 def _prior_user_message(
     conversation_history: Optional[list[dict[str, Any]]],
 ) -> Optional[str]:
@@ -1482,18 +1541,22 @@ def generate_socratic_hint_auto_topic(
     """
     Generate a hint when only free-text question/answer is provided.
 
-    If topic_id is omitted, infer it from question keywords each turn.
-    When the inferred topic changes, prior chat history is not sent to the LLM.
+    If topic_id is supplied, it is authoritative. Otherwise infer the first
+    topic, retain it for conversational follow-ups, and switch only when the
+    learner clearly asks a confidently classifiable question about another topic.
+    When the resolved topic changes, prior chat history is not sent to the LLM.
 
     Acknowledgment / gratitude and standalone greetings short-circuit before
     topic inference and RAG.
     """
     if _is_greeting_intent(student_answer):
-        return _greeting_opener_response(
+        response = _greeting_opener_response(
             user_id=user_id,
             persona_id=persona_id,
             bkt=bkt,
         )
+        response["topic_routing"] = "none"
+        return response
 
     if _is_acknowledgment_intent(student_answer):
         sticky_topic = (
@@ -1501,18 +1564,22 @@ def generate_socratic_hint_auto_topic(
             or _last_resolved_topic_by_user.get(str(user_id))
             or FALLBACK_TOPIC_ID
         )
-        return _acknowledgment_closure_response(
+        response = _acknowledgment_closure_response(
             user_id=user_id,
-            topic_id=sticky_topic,
+            topic_id=normalize_topic_id(sticky_topic),
             persona_id=persona_id,
             bkt=bkt,
             topic_id_inferred=topic_id is None,
             topic_changed=False,
         )
+        response["topic_routing"] = "explicit" if topic_id else "continued"
+        return response
 
-    resolved_topic = topic_id or infer_topic_id_from_question(
+    resolved_topic, topic_routing = _resolve_topic_for_turn(
+        user_id,
         student_answer,
-        conversation_history=conversation_history,
+        topic_id,
+        conversation_history,
     )
     scoped_history, topic_changed = _scope_history_for_topic(
         user_id,
@@ -1530,6 +1597,7 @@ def generate_socratic_hint_auto_topic(
     )
     result["topic_id_inferred"] = topic_id is None
     result["topic_id_resolved"] = resolved_topic
+    result["topic_routing"] = topic_routing
     result["topic_changed"] = topic_changed
     result["history_turns_sent"] = len(scoped_history or [])
     return result

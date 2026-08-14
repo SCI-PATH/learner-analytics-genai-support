@@ -23,6 +23,7 @@ from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Path as ApiPath
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,8 @@ app = FastAPI(
         "`mastery_category` (`basic` / `intermediate` / `advanced`) without recording an attempt.\n\n"
         "**Question Engine (write attempt):** `POST /api/v1/assessment-submit` records a scored "
         "quiz item, updates BKT, and returns the new P(L) + category.\n\n"
+        "**Student focus areas:** `GET /api/v1/analytics/student-focus-areas/{user_id}` lists "
+        "at-risk topics for one learner (student profile).\n\n"
         "Interactive docs: `/docs` (Swagger) and `/redoc`."
     ),
     version="0.1.0",
@@ -59,8 +62,25 @@ app = FastAPI(
         },
         {"name": "Tutor", "description": "Socratic chatbot hint endpoints."},
         {"name": "Engagement", "description": "Frustration cues from Component 3."},
-        {"name": "Analytics", "description": "Teacher dashboard: matrix, at-risk, student profile."},
+        {
+            "name": "Analytics",
+            "description": (
+                "Teacher dashboard (matrix, classroom at-risk) and student-facing "
+                "focus areas / profile endpoints."
+            ),
+        },
     ],
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Lightweight in-memory analytics signals for at-risk trend checks.
@@ -305,6 +325,197 @@ def _recent_signal_avg(user_id: str, topic_id: str, window: int = 5) -> Optional
         return None
     tail = vals[-max(1, int(window)) :]
     return float(sum(tail) / len(tail))
+
+
+def _risk_criteria_payload() -> dict[str, Any]:
+    return {
+        "low_mastery_threshold": _MASTERY_LOW_THRESHOLD,
+        "critical_mastery_threshold": _MASTERY_CRITICAL_THRESHOLD,
+        "recent_performance_threshold": 0.4,
+        "negative_velocity_rule": "last_3_signals_strictly_decreasing",
+        "alert_rule": "at_least_2_of_3_signals(low_mastery, negative_velocity, weak_recent_performance)",
+        "immediate_override_rule": "mastery_below_critical_and_weak_recent_performance",
+    }
+
+
+def _compose_topic_risk_alert(
+    *,
+    student_id: str,
+    topic_id: str,
+    mastery: float,
+    low_mastery: bool,
+    neg_velocity: bool,
+    weak_recent_perf: bool,
+    recent_signal_tail: list[float],
+    recent_performance_avg: Optional[float],
+) -> Optional[dict[str, Any]]:
+    """
+    Shared at-risk / focus-area rule for one (student, topic).
+
+    Returns None when fewer than 2 of the 3 primary signals fire.
+    """
+    signal_count = int(low_mastery) + int(neg_velocity) + int(weak_recent_perf)
+    if signal_count < 2:
+        return None
+
+    reasons: list[str] = []
+    risk_score = 0
+    if low_mastery:
+        reasons.append("Low Mastery")
+        risk_score += 40
+    if neg_velocity:
+        reasons.append("Declining Mastery Velocity")
+        risk_score += 30
+    if weak_recent_perf:
+        reasons.append("Weak Recent Performance")
+        risk_score += 30
+    if mastery < _MASTERY_CRITICAL_THRESHOLD and weak_recent_perf:
+        reasons.append("Critical Low Mastery")
+        risk_score = max(risk_score, 85)
+
+    return {
+        "student_id": str(student_id),
+        "topic_id": str(topic_id),
+        "mastery_probability": round(float(mastery), 4),
+        "mastery_category": _mastery_category_from_pl(mastery),
+        "negative_velocity": bool(neg_velocity),
+        "recent_signal_tail": [round(float(v), 4) for v in recent_signal_tail],
+        "recent_performance_avg": (
+            None if recent_performance_avg is None else round(float(recent_performance_avg), 4)
+        ),
+        "signals_triggered": signal_count,
+        "signals": {
+            "low_mastery": bool(low_mastery),
+            "negative_velocity": bool(neg_velocity),
+            "weak_recent_performance": bool(weak_recent_perf),
+        },
+        "risk_score": int(min(100, max(0, risk_score))),
+        "reason": "; ".join(reasons),
+    }
+
+
+def _build_student_focus_areas(
+    user_id: str,
+    *,
+    mode: str = "live_state",
+    topic_ids: Optional[list[str]] = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Return all at-risk topics for one learner (student focus areas).
+
+    Unlike the classroom at-risk endpoint (one current topic per student), this
+    scans every topic the learner has evidence on.
+    """
+    uid = str(user_id)
+    focus_areas: list[dict[str, Any]] = []
+
+    if mode == "replay_logs":
+        engine = _get_replay_engine()
+        all_topics = sorted(engine.skill_map.keys())
+        topic_pool = [t for t in (topic_ids if topic_ids else all_topics) if t in engine.skill_map]
+        logs_df = engine.logs_df.copy()
+        logs_df["user_id"] = logs_df["user_id"].astype(str)
+        logs_df["skill_name"] = logs_df["skill_name"].astype(str)
+        u_df = logs_df[
+            (logs_df["user_id"] == uid) & (logs_df["skill_name"].isin(set(topic_pool)))
+        ].copy()
+        if u_df.empty:
+            return [], {"known_topics": all_topics, "topics_scanned": 0}
+
+        u_df = u_df.sort_values(["order_id"]).reset_index(drop=True)
+        work = deepcopy(engine)
+        mastery_hist: dict[str, list[float]] = defaultdict(list)
+        for row in u_df.itertuples(index=False):
+            topic = str(getattr(row, "skill_name"))
+            is_correct = int(getattr(row, "correct"))
+            response_time = None
+            if hasattr(row, "response_time"):
+                try:
+                    response_time = float(getattr(row, "response_time"))
+                except (TypeError, ValueError):
+                    response_time = None
+            out = work.predict_update(uid, topic, is_correct, response_time)
+            mastery_hist[topic].append(float(out.get("mastery_probability", 0.0)))
+
+        topics_with_evidence = sorted(set(u_df["skill_name"].astype(str)))
+        for topic in topics_with_evidence:
+            mastery = float(work.get_current_mastery_probability(uid, topic))
+            low_mastery = mastery < _MASTERY_LOW_THRESHOLD
+            tail = mastery_hist.get(topic, [])[-3:]
+            neg_velocity = len(tail) >= 3 and bool(tail[0] > tail[1] > tail[2])
+            sig_tail = [
+                float(getattr(r, "correct"))
+                for r in u_df.itertuples(index=False)
+                if str(getattr(r, "skill_name")) == topic
+            ][-5:]
+            recent_perf = (sum(sig_tail) / len(sig_tail)) if sig_tail else None
+            weak_recent_perf = (recent_perf is not None) and (recent_perf < 0.4)
+            alert = _compose_topic_risk_alert(
+                student_id=uid,
+                topic_id=topic,
+                mastery=mastery,
+                low_mastery=low_mastery,
+                neg_velocity=neg_velocity,
+                weak_recent_perf=weak_recent_perf,
+                recent_signal_tail=tail,
+                recent_performance_avg=recent_perf,
+            )
+            if alert:
+                focus_areas.append(alert)
+        focus_areas.sort(key=lambda a: a["risk_score"], reverse=True)
+        return focus_areas, {
+            "known_topics": all_topics,
+            "topics_scanned": len(topics_with_evidence),
+        }
+
+    # live_state
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    all_topics = sorted(engine.skill_map.keys())
+    topic_pool = [t for t in (topic_ids if topic_ids else all_topics) if t in engine.skill_map]
+
+    live_topics = {
+        str(row.get("topic_id") or "")
+        for row in _live_attempts_for_user(uid)
+        if row.get("topic_id")
+    }
+    signal_topics = {
+        tid for (u, tid), vals in _signal_history.items() if u == uid and vals
+    }
+    state_topics = {
+        tid
+        for (u, tid), state in engine.student_state.items()
+        if u == uid and isinstance(state, dict) and int(state.get("attempts", 0)) > 0
+    }
+    topics_with_evidence = sorted(
+        (live_topics | signal_topics | state_topics) & set(topic_pool)
+    )
+
+    for topic in topics_with_evidence:
+        mastery = float(engine.get_current_mastery_probability(uid, topic))
+        low_mastery = mastery < _MASTERY_LOW_THRESHOLD
+        neg_velocity = _has_negative_velocity(uid, topic)
+        recent_avg = _recent_signal_avg(uid, topic, window=5)
+        weak_recent_perf = (recent_avg is not None) and (recent_avg < 0.4)
+        alert = _compose_topic_risk_alert(
+            student_id=uid,
+            topic_id=topic,
+            mastery=mastery,
+            low_mastery=low_mastery,
+            neg_velocity=neg_velocity,
+            weak_recent_perf=weak_recent_perf,
+            recent_signal_tail=list(_signal_history.get((uid, topic), []))[-3:],
+            recent_performance_avg=recent_avg,
+        )
+        if alert:
+            focus_areas.append(alert)
+
+    focus_areas.sort(key=lambda a: a["risk_score"], reverse=True)
+    return focus_areas, {
+        "known_topics": all_topics,
+        "topics_scanned": len(topics_with_evidence),
+    }
 
 
 def _record_chat_turn(
@@ -1126,7 +1337,7 @@ def _build_replay_at_risk_alerts(
     return alerts, {"known_topics": all_topics}
 
 
-@app.post("/api/v1/analytics/at-risk-students")
+@app.post("/api/v1/analytics/at-risk-students", tags=["Analytics"])
 def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> dict[str, Any]:
     """
     Return students predicted as at-risk for intervention.
@@ -1169,62 +1380,79 @@ def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> d
             recent_avg = _recent_signal_avg(uid, current_topic, window=5)
             weak_recent_perf = (recent_avg is not None) and (recent_avg < 0.4)
 
-            signal_count = int(low_mastery) + int(neg_velocity) + int(weak_recent_perf)
-            if signal_count < 2:
-                continue
-
-            reasons: list[str] = []
-            if low_mastery:
-                reasons.append("Low Mastery")
-            if neg_velocity:
-                reasons.append("Declining Performance Velocity")
-            if weak_recent_perf:
-                reasons.append("Weak Recent Performance")
-
-            risk_score = 0
-            if low_mastery:
-                risk_score += 40
-            if neg_velocity:
-                risk_score += 30
-            if weak_recent_perf:
-                risk_score += 30
-            if mastery < _MASTERY_CRITICAL_THRESHOLD and weak_recent_perf:
-                reasons.append("Critical Low Mastery")
-                risk_score = max(risk_score, 85)
-
-            alerts.append(
-                {
-                    "student_id": uid,
-                    "topic_id": current_topic,
-                    "mastery_probability": round(mastery, 4),
-                    "mastery_category": _mastery_category_from_pl(mastery),
-                    "negative_velocity": bool(neg_velocity),
-                    "recent_signal_tail": list(_signal_history.get((uid, current_topic), []))[-3:],
-                    "recent_performance_avg": (None if recent_avg is None else round(float(recent_avg), 4)),
-                    "signals_triggered": signal_count,
-                    "risk_score": int(min(100, max(0, risk_score))),
-                    "reason": "; ".join(reasons),
-                }
+            alert = _compose_topic_risk_alert(
+                student_id=uid,
+                topic_id=current_topic,
+                mastery=mastery,
+                low_mastery=low_mastery,
+                neg_velocity=neg_velocity,
+                weak_recent_perf=weak_recent_perf,
+                recent_signal_tail=list(_signal_history.get((uid, current_topic), []))[-3:],
+                recent_performance_avg=recent_avg,
             )
+            if alert:
+                alerts.append(alert)
 
         alerts.sort(key=lambda a: a["risk_score"], reverse=True)
     return {
         "success": True,
         "mode": mode,
-        "criteria": {
-            "low_mastery_threshold": _MASTERY_LOW_THRESHOLD,
-            "critical_mastery_threshold": _MASTERY_CRITICAL_THRESHOLD,
-            "recent_performance_threshold": 0.4,
-            "negative_velocity_rule": "last_3_signals_strictly_decreasing",
-            "alert_rule": "at_least_2_of_3_signals(low_mastery, negative_velocity, weak_recent_performance)",
-            "immediate_override_rule": "mastery_below_critical_and_weak_recent_performance",
-        },
+        "criteria": _risk_criteria_payload(),
         "count": len(alerts),
         "students": alerts,
     }
 
 
-@app.post("/api/v1/mastery/matrix")
+@app.get(
+    "/api/v1/analytics/student-focus-areas/{user_id}",
+    tags=["Analytics"],
+    summary="Student focus areas (at-risk topics for one learner)",
+    response_description="Topics this student should practice, ranked by risk_score",
+)
+def analytics_student_focus_areas(
+    user_id: str = ApiPath(
+        ...,
+        description="Learner ID — same `user_id` used on tutor / assessment-submit.",
+        example="user_001",
+    ),
+    mode: str = "live_state",
+) -> dict[str, Any]:
+    """
+    **Student-facing** list of at-risk / focus topics for one learner.
+
+    Use this on the student profile page so learners can see where they need more practice.
+    Teachers should continue using ``POST /api/v1/analytics/at-risk-students`` for the
+    classroom overview.
+
+    Unlike the classroom endpoint (one *current* topic per student), this scans **all**
+    topics the learner has evidence on (attempts, tutor signals, or synthetic-log rows).
+
+    Same risk rule as teacher alerts: at least 2 of
+    low mastery / declining velocity / weak recent performance.
+    """
+    if mode not in {"replay_logs", "live_state"}:
+        return {"success": False, "error": "mode must be replay_logs or live_state"}
+
+    focus_areas, meta = _build_student_focus_areas(str(user_id), mode=mode)
+    return {
+        "success": True,
+        "mode": mode,
+        "user_id": str(user_id),
+        "criteria": _risk_criteria_payload(),
+        "count": len(focus_areas),
+        "focus_areas": focus_areas,
+        "meta": {
+            "topics_scanned": meta.get("topics_scanned", 0),
+            "audience": "student",
+            "note": (
+                "Empty focus_areas means no topic currently meets the at-risk rule "
+                "for this learner."
+            ),
+        },
+    }
+
+
+@app.post("/api/v1/mastery/matrix", tags=["Analytics"])
 def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     """
     Return mastery probabilities for a classroom slice (students x topics).
@@ -1251,7 +1479,11 @@ def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     }
 
 
-@app.get("/api/v1/analytics/student-profile/{user_id}")
+@app.get(
+    "/api/v1/analytics/student-profile/{user_id}",
+    tags=["Analytics"],
+    summary="Deep-dive learner profile (teacher or student)",
+)
 def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[str, Any]:
     """
     Deep-dive profile for one learner.
@@ -1260,6 +1492,9 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
     - replay_logs: derive profile from synthetic_logs.csv replay + in-memory cues/chat
     - live_state: derive BKT values from current shared engine state; assessment analytics prefer
       live Question Engine attempts when present, else synthetic-log fallback.
+
+    Also embeds ``focus_areas`` (same payload as
+    ``GET /api/v1/analytics/student-focus-areas/{user_id}``) for one-call profile pages.
     """
     if mode not in {"replay_logs", "live_state"}:
         return {"success": False, "error": "mode must be replay_logs or live_state"}
@@ -1367,12 +1602,15 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
     critical_confusion_turns = [
         row for row in chat_tail if bool(row.get("critical_confusion")) is True
     ]
+    focus_areas, focus_meta = _build_student_focus_areas(str(user_id), mode=mode)
     return {
         "success": True,
         "mode": mode,
         "user_id": str(user_id),
         "topics_covered_count": len([t for t in mastery_by_topic.keys() if mastery_by_topic[t]]),
         "bkt_parameters": bkt_parameters,
+        "focus_areas": focus_areas,
+        "focus_areas_count": len(focus_areas),
         "assessment_insights": {
             "most_frequent_distractor_tags": top_distractors,
             "attempts_count": len(profile_attempts),
@@ -1398,6 +1636,8 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
             "engagement_points": len(engagement_tail),
             "chat_points": len(chat_tail),
             "overall_mastery_tail": [round(v, 4) for v in mastery_all[-10:]],
+            "focus_areas_topics_scanned": focus_meta.get("topics_scanned", 0),
+            "focus_areas_endpoint": f"/api/v1/analytics/student-focus-areas/{user_id}",
         },
     }
 

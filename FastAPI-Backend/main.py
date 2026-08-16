@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -89,8 +89,25 @@ _latest_topic_by_user: dict[str, str] = {}
 _frustration_history: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=50))
 _chat_history_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=100))
 _assessment_attempts_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=500))
-QuestionType = Literal["MCQ", "SHORT_ANSWER"]
+QuestionType = Literal["MCQ", "ShortAnswer", "MultiBlank", "TrueFalse"]
 DistractorTag = Literal["NEAR_MISS", "MISCONCEPTION", "COMPLETE_MISS"]
+ErrorCategory = Literal[
+    "NO_ERROR",
+    "SPELLING_GRAMMAR_ERROR",
+    "MISSING_KEYWORDS",
+    "CONCEPTUAL_MISCONCEPTION",
+    "COMPLETELY_IRRELEVANT",
+    "PARTIAL_MASTERY",
+    "FULL_MISCONCEPTION",
+]
+_QUESTION_TYPE_ALIASES = {
+    "SHORT_ANSWER": "ShortAnswer",
+    "SHORTANSWER": "ShortAnswer",
+    "MULTI_BLANK": "MultiBlank",
+    "MULTIBLANK": "MultiBlank",
+    "TRUE_FALSE": "TrueFalse",
+    "TRUEFALSE": "TrueFalse",
+}
 MasteryCategory = Literal["basic", "intermediate", "advanced"]
 _SLIP_HIGH_THRESHOLD = 0.15
 _MASTERY_LOW_THRESHOLD = 0.45
@@ -136,6 +153,24 @@ def _distractor_tags_for_topic(topic_id: str) -> list[str]:
         "Partial understanding of key concept",
         "Misapplied science rule",
     ]
+
+
+def _canonicalize_question_type(value: Any) -> Optional[str]:
+    """Map Question Engine aliases (e.g. SHORT_ANSWER) onto canonical bank values."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw in {"MCQ", "ShortAnswer", "MultiBlank", "TrueFalse"}:
+        return raw
+    mapped = _QUESTION_TYPE_ALIASES.get(raw.upper().replace("-", "_").replace(" ", "_"))
+    if mapped:
+        return mapped
+    raise ValueError(
+        "question_type must be MCQ, ShortAnswer, MultiBlank, or TrueFalse "
+        "(SHORT_ANSWER is accepted as an alias of ShortAnswer)"
+    )
 
 
 def _append_signal(user_id: str, topic_id: str, value: float) -> None:
@@ -572,6 +607,9 @@ def _normalize_assessment_attempt(payload: dict[str, Any]) -> dict[str, Any]:
         "distractor_tag",
         "distractor_label",
         "similarity_score",
+        "error_category",
+        "detailed_explanation",
+        "missed_blanks",
         "response_time_s",
         "difficulty_level",
         "subtopic_id",
@@ -741,13 +779,21 @@ class TutorHintAutoTopicRequest(BaseModel):
 
 
 class AssessmentSubmitRequest(BaseModel):
-    """Verified quiz outcome; updates the same BKT state as the tutor."""
+    """Verified quiz outcome; updates the same BKT state as the tutor.
+
+    BKT always updates from ``is_correct`` (0/1). ``question_type`` is metadata
+    only — MCQ, ShortAnswer, MultiBlank, and TrueFalse all drive the same engine.
+    """
 
     user_id: str = Field(..., description="Student identifier")
-    topic_id: str = Field(..., description="Curriculum topic / skill id, e.g. G6_S8_ELE_CIRCUITS")
+    topic_id: str = Field(..., description="Curriculum topic / skill id, e.g. G6_C8_ELE_CIRCUITS")
     is_correct: bool = Field(..., description="Ground-truth correctness for this assessment item")
     question_type: Optional[QuestionType] = Field(
-        None, description="MCQ or SHORT_ANSWER — drives analytics field interpretation"
+        None,
+        description=(
+            "Question Engine item type: MCQ, ShortAnswer, MultiBlank, or TrueFalse. "
+            "SHORT_ANSWER is accepted as an alias of ShortAnswer."
+        ),
     )
     distractor_tag: Optional[DistractorTag] = Field(
         None, description="Wrong MCQ error category: NEAR_MISS, MISCONCEPTION, or COMPLETE_MISS"
@@ -756,7 +802,24 @@ class AssessmentSubmitRequest(BaseModel):
         None, description="Short misconception phrase for Misconception Cloud aggregation"
     )
     similarity_score: Optional[float] = Field(
-        None, ge=0.0, le=1.0, description="Short-answer semantic similarity to marking scheme"
+        None,
+        ge=0.0,
+        le=1.0,
+        description="ShortAnswer / MultiBlank closeness to marking scheme (0–1)",
+    )
+    error_category: Optional[ErrorCategory] = Field(
+        None,
+        description=(
+            "Diagnostic class from Question Engine. ShortAnswer: NO_ERROR, "
+            "SPELLING_GRAMMAR_ERROR, MISSING_KEYWORDS, CONCEPTUAL_MISCONCEPTION, "
+            "COMPLETELY_IRRELEVANT. MultiBlank: NO_ERROR, PARTIAL_MASTERY, FULL_MISCONCEPTION."
+        ),
+    )
+    detailed_explanation: Optional[str] = Field(
+        None, description="1–2 sentence explanation (wrong ShortAnswer / TrueFalse)"
+    )
+    missed_blanks: Optional[dict[str, str]] = Field(
+        None, description='MultiBlank missed slots, e.g. {"1": "base"}'
     )
     response_time_s: Optional[float] = Field(None, ge=0.0, description="Seconds taken to answer")
     difficulty_level: Optional[float] = Field(None, description="Item difficulty on question-engine scale")
@@ -766,6 +829,29 @@ class AssessmentSubmitRequest(BaseModel):
         None, description="Full text of chosen wrong MCQ option when label is omitted"
     )
     source: Optional[str] = Field(None, description="Calling module identifier, e.g. question_engine_v1")
+
+    @field_validator("question_type", mode="before")
+    @classmethod
+    def _normalize_question_type(cls, value: Any) -> Optional[str]:
+        return _canonicalize_question_type(value)
+
+    @field_validator("error_category", "detailed_explanation", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("missed_blanks", mode="before")
+    @classmethod
+    def _normalize_missed_blanks(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        if isinstance(value, dict):
+            return {str(k): str(v) for k, v in value.items()}
+        return value
 
 
 class FrustrationCueSubmitRequest(BaseModel):
@@ -944,6 +1030,10 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
 
     Calls ``predict_update`` on the shared ``ScienceBKT`` so quiz results and
     tutor dialogue update the **same** per-learner, per-skill mastery.
+
+    BKT uses only ``is_correct`` (and optional ``response_time_s``). ``question_type``
+    (MCQ / ShortAnswer / MultiBlank / TrueFalse) is stored for analytics and does
+    **not** change whether mastery is updated.
     """
     engine = get_shared_bkt_engine()
     label = 1 if req.is_correct else 0
@@ -977,6 +1067,9 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
             "distractor_tag": req.distractor_tag,
             "distractor_label": req.distractor_label,
             "similarity_score": req.similarity_score,
+            "error_category": req.error_category,
+            "detailed_explanation": req.detailed_explanation,
+            "missed_blanks": req.missed_blanks,
             "response_time_s": response_time_s,
             "difficulty_level": req.difficulty_level,
             "subtopic_id": req.subtopic_id,
@@ -1007,6 +1100,9 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
                 "distractor_tag",
                 "distractor_label",
                 "similarity_score",
+                "error_category",
+                "detailed_explanation",
+                "missed_blanks",
                 "response_time_s",
                 "difficulty_level",
                 "subtopic_id",
@@ -1588,6 +1684,10 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
                 "mastery_probability": row.get("updated_mastery_probability"),
                 "distractor_label": row.get("distractor_label"),
                 "question_type": row.get("question_type"),
+                "error_category": row.get("error_category"),
+                "detailed_explanation": row.get("detailed_explanation"),
+                "missed_blanks": row.get("missed_blanks"),
+                "similarity_score": row.get("similarity_score"),
             }
             for row in live_attempts[-10:]
         ]

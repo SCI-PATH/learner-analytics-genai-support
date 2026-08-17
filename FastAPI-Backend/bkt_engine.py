@@ -48,37 +48,66 @@ except ImportError as exc:
         "pyBKT is required. Install it with: pip install pyBKT"
     ) from exc
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Literature defaults when Postgres has no per-skill row (Corbett & Anderson style).
+LITERATURE_BKT_DEFAULTS: dict[str, float] = {
+    "prior": 0.25,
+    "learn": 0.15,
+    "guess": 0.20,
+    "slip": 0.10,
+    "forget": 0.0,
+}
+
 
 class ScienceBKT:
-    def __init__(self, data_path: str = "synthetic_logs.csv", seed: int = 42, num_fits: int = 1):
+    def __init__(
+        self,
+        data_path: str | None = None,
+        seed: int = 42,
+        num_fits: int = 1,
+        params_source: str = "postgres",
+        persist_mastery: bool = False,
+    ):
         """
-        Initialize ScienceBKT with synthetic logs and pyBKT model setup.
+        Initialize ScienceBKT with pyBKT model setup.
 
         **Live mastery:** One latent P(L) per ``(user_id, skill_name)`` in
         ``student_state``. Both the assessment module and the Socratic tutor should
         call ``predict_update`` on this same instance so quiz outcomes and dialogue
-        observations extend a **single** trajectory (assessment = reliable labels;
-        dialogue = optional noisy labels when the caller supplies them).
+        observations extend a **single** trajectory.
 
-        Expected input schema in CSV:
-        - user_id
-        - skill_name
-        - correct
-        - response_time (optional for modeling but useful metadata)
+        params_source:
+            ``postgres`` — read ``learner_analytics.bkt_skill_params`` (production).
+            ``csv`` — optional offline path; requires ``data_path`` with training logs.
+        persist_mastery:
+            When True, each ``predict_update`` upserts ``learner_analytics.bkt_mastery``.
         """
-        self.data_path = self._resolve_data_path(data_path)
-        if not self.data_path.exists():
-            raise FileNotFoundError(f"Dataset not found: {self.data_path}")
+        source = str(params_source or "postgres").strip().lower()
+        self.params_source = "postgres" if source == "postgres" else "csv"
+        self.persist_mastery = bool(persist_mastery)
 
-        self.logs_df = pd.read_csv(self.data_path)
+        if self.params_source == "csv" or data_path:
+            self.data_path = self._resolve_data_path(data_path or "synthetic_logs.csv")
+            if not self.data_path.exists():
+                raise FileNotFoundError(f"Dataset not found: {self.data_path}")
+            self.logs_df = pd.read_csv(self.data_path)
+        else:
+            self.data_path = None
+            self.logs_df = pd.DataFrame(
+                columns=["user_id", "skill_name", "correct", "response_time"]
+            )
+
         required_cols = {"user_id", "skill_name", "correct"}
         missing = required_cols - set(self.logs_df.columns)
-        if missing:
+        if missing and not self.logs_df.empty:
             raise ValueError(f"Missing required columns in dataset: {sorted(missing)}")
 
-        # pyBKT works best when an order column is explicitly available.
-        self.logs_df = self.logs_df.copy()
-        self.logs_df["order_id"] = range(1, len(self.logs_df) + 1)
+        if not self.logs_df.empty:
+            self.logs_df = self.logs_df.copy()
+            self.logs_df["order_id"] = range(1, len(self.logs_df) + 1)
+        else:
+            self.logs_df["order_id"] = pd.Series(dtype=int)
 
         # Column mapping expected by pyBKT for non-standard datasets.
         self.defaults = {
@@ -88,14 +117,16 @@ class ScienceBKT:
             "order_id": "order_id",
         }
 
-        # Core pyBKT model used repeatedly for per-skill fitting.
+        # Core pyBKT model used repeatedly for per-skill fitting (offline csv mode).
         self.model = Model(seed=seed, num_fits=num_fits)
-        # Mapping of Grade-6 topic IDs used by this engine.
+        # Mapping of Grade 6–9 topic IDs used by this engine.
         self.skill_map = {}
         # Cached per-skill parameters (prior/learn/guess/slip/forget).
         self.skill_params = {}
         # Real-time state keyed by (user_id, skill_name): mastery, attempts, streak.
         self.student_state = {}
+        # Learners whose Postgres mastery rows were bulk-loaded (avoids N+1 queries).
+        self._db_prefetched_users: set[str] = set()
         # Quick lookup for current risk flag per user+skill.
         self.at_risk_flags = defaultdict(dict)
         self.skipped_skills = {}
@@ -109,24 +140,24 @@ class ScienceBKT:
     @staticmethod
     def _resolve_data_path(data_path: str) -> Path:
         """
-        Resolve CSV path robustly after project reorganization.
+        Resolve CSV path relative to repo root or Data/.
 
         Search order:
         1) Provided path as-is (relative to current working directory).
-        2) Path relative to this module's directory.
-        3) `DOCS/synthetic_logs.csv` relative to this module's directory.
+        2) Path relative to repo root.
+        3) `Data/<filename>` under repo root.
         """
         raw = Path(data_path)
-        if raw.exists():
-            return raw
-        module_dir = Path(__file__).resolve().parent
-        candidate_local = module_dir / data_path
-        if candidate_local.exists():
-            return candidate_local
-        candidate_docs = module_dir / "DOCS" / "synthetic_logs.csv"
-        if candidate_docs.exists():
-            return candidate_docs
-        return raw
+        if raw.is_file():
+            return raw.resolve()
+        candidates = (
+            PROJECT_ROOT / raw,
+            PROJECT_ROOT / "Data" / raw.name,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        return (PROJECT_ROOT / "Data" / raw.name).resolve()
 
     @staticmethod
     def _read_env_float(name: str, default: float, lo: float, hi: float) -> float:
@@ -141,18 +172,39 @@ class ScienceBKT:
 
     def initialize_skills(self) -> dict[str, str]:
         """
-        Build the skill map from Grade-6 topic IDs present in the logs.
+        Build the skill map from Grade 6–9 topic IDs.
 
-        In this dataset, Grade 6 IDs are expected to look like: G6_...
+        Live (``params_source=postgres``) prefers topic IDs already present in
+        ``learner_analytics.bkt_skill_params``. Replay falls back to the CSV.
         """
-        unique_skills = sorted(self.logs_df["skill_name"].dropna().astype(str).unique())
+        if self.params_source == "postgres":
+            try:
+                from postgres_store import list_bkt_skill_ids
 
-        # Grade 6 topic IDs in this dataset follow IDs like G6_...
-        grade6_skills = [s for s in unique_skills if re.match(r"^G6[_-]", s)]
-        if not grade6_skills:
-            raise ValueError("No Grade 6 Topic IDs found in the dataset.")
+                db_topics = [
+                    tid
+                    for tid in list_bkt_skill_ids()
+                    if re.match(r"^G[6-9][_-]", str(tid))
+                ]
+            except Exception:
+                db_topics = []
+            if db_topics:
+                self.skill_map = {topic_id: topic_id for topic_id in db_topics}
+                return self.skill_map
 
-        self.skill_map = {topic_id: topic_id for topic_id in grade6_skills}
+        if not self.logs_df.empty:
+            unique_skills = sorted(self.logs_df["skill_name"].dropna().astype(str).unique())
+            curriculum_skills = [s for s in unique_skills if re.match(r"^G[6-9][_-]", s)]
+            if curriculum_skills:
+                self.skill_map = {topic_id: topic_id for topic_id in curriculum_skills}
+                return self.skill_map
+
+        from curriculum_topics import TOPIC_IDS
+
+        curriculum_skills = [s for s in TOPIC_IDS if re.match(r"^G[6-9][_-]", str(s))]
+        if not curriculum_skills:
+            raise ValueError("No Grade 6–9 topic IDs found in Postgres, CSV, or curriculum catalog.")
+        self.skill_map = {topic_id: topic_id for topic_id in curriculum_skills}
         return self.skill_map
 
     def train_model(self) -> dict[str, dict[str, float]]:
@@ -355,9 +407,25 @@ class ScienceBKT:
             "forget": get_param("forgets", 0.01),
         }
 
+    @staticmethod
+    def literature_default_params() -> dict[str, float]:
+        return dict(LITERATURE_BKT_DEFAULTS)
+
     def _ensure_skill_params(self, skill_name: str) -> None:
-        """Load or fit+calibrate BKT parameters for one skill (single-skill slice from logs)."""
+        """Load BKT parameters for one skill (Postgres table or literature defaults)."""
         if skill_name in self.skill_params:
+            return
+        if self.params_source == "postgres":
+            try:
+                from postgres_store import fetch_skill_params
+
+                db_params = fetch_skill_params(skill_name)
+            except Exception:
+                db_params = None
+            if db_params:
+                self.skill_params[skill_name] = db_params
+                return
+            self.skill_params[skill_name] = self.literature_default_params()
             return
         skill_df = self.logs_df[self.logs_df["skill_name"] == skill_name].copy()
         if skill_df.empty:
@@ -367,7 +435,7 @@ class ScienceBKT:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
             self.model.fit(data=skill_df, defaults=self.defaults, num_fits=12)
-        pred_df = self.model.predict(data=skill_df)
+            pred_df = self.model.predict(data=skill_df)
         y_pred = pred_df["correct_predictions"].to_numpy(dtype=float)
         valid = np.isfinite(y_pred)
         if (not self._pybkt_prior_is_valid(skill_name)) or (
@@ -376,6 +444,142 @@ class ScienceBKT:
             self.skill_params[skill_name] = self._calibrate_bkt_params(skill_df)
         else:
             self.skill_params[skill_name] = self._extract_skill_params(skill_name, skill_df)
+
+    def prefetch_learner_states(self, user_id: str) -> None:
+        """Bulk-load persisted mastery for one learner (single Postgres round trip)."""
+        uid = str(user_id)
+        if uid in self._db_prefetched_users:
+            return
+        self._db_prefetched_users.add(uid)
+        if not (self.persist_mastery or self.params_source == "postgres"):
+            return
+        try:
+            from postgres_store import fetch_mastery_states_for_learner
+
+            rows = fetch_mastery_states_for_learner(uid)
+        except Exception:
+            return
+        for topic_id, db_state in rows.items():
+            state_key = (uid, str(topic_id))
+            self.student_state[state_key] = {
+                "mastery": float(db_state["mastery"]),
+                "attempts": int(db_state["attempts"]),
+                "consecutive_incorrect": int(db_state["consecutive_incorrect"]),
+            }
+            self.at_risk_flags[uid][str(topic_id)] = (
+                "At-Risk" if db_state.get("at_risk") else "On-Track"
+            )
+
+    def _hydrate_student_state(self, user_id: str, skill_name: str, prior: float) -> dict[str, Any]:
+        """Load (user, skill) state from Postgres if persisted, else start at prior."""
+        state_key = (user_id, skill_name)
+        if state_key in self.student_state:
+            return self.student_state[state_key]
+        uid = str(user_id)
+        if uid in self._db_prefetched_users:
+            state = {
+                "mastery": float(prior),
+                "attempts": 0,
+                "consecutive_incorrect": 0,
+            }
+            self.student_state[state_key] = state
+            return state
+        db_state = None
+        if self.persist_mastery or self.params_source == "postgres":
+            try:
+                from postgres_store import fetch_mastery_state
+
+                db_state = fetch_mastery_state(uid, str(skill_name))
+            except Exception:
+                db_state = None
+        if db_state:
+            state = {
+                "mastery": float(db_state["mastery"]),
+                "attempts": int(db_state["attempts"]),
+                "consecutive_incorrect": int(db_state["consecutive_incorrect"]),
+            }
+        else:
+            state = {
+                "mastery": float(prior),
+                "attempts": 0,
+                "consecutive_incorrect": 0,
+            }
+        self.student_state[state_key] = state
+        if db_state:
+            self.at_risk_flags[user_id][skill_name] = (
+                "At-Risk" if db_state.get("at_risk") else "On-Track"
+            )
+        return state
+
+    def _persist_student_state(
+        self,
+        user_id: str,
+        skill_name: str,
+        *,
+        mastery: float,
+        attempts: int,
+        consecutive_incorrect: int,
+        at_risk: bool,
+    ) -> dict[str, Any]:
+        if not self.persist_mastery:
+            return {"ok": False, "skipped": True, "reason": "persist_mastery is disabled"}
+        try:
+            from postgres_store import upsert_mastery_state
+
+            return upsert_mastery_state(
+                learner_id=str(user_id),
+                topic_id=str(skill_name),
+                p_l=float(mastery),
+                attempts=int(attempts),
+                consecutive_incorrect=int(consecutive_incorrect),
+                at_risk=bool(at_risk),
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def preload_calibrated_skill_params(self, *, trials: int = 8) -> int:
+        """
+        Pre-load per-skill BKT parameters.
+
+        Postgres mode: bulk-read ``bkt_skill_params`` (literature defaults for gaps).
+        CSV mode: offline calibration from ``logs_df`` (Scripts/evaluation only).
+        """
+        if self.params_source == "postgres":
+            try:
+                from postgres_store import fetch_skill_params
+            except Exception:
+                fetch_skill_params = None  # type: ignore[assignment,misc]
+            loaded = 0
+            for skill_name in self.skill_map:
+                if skill_name in self.skill_params:
+                    continue
+                db_params = None
+                if fetch_skill_params is not None:
+                    try:
+                        db_params = fetch_skill_params(skill_name)
+                    except Exception:
+                        db_params = None
+                self.skill_params[skill_name] = db_params or self.literature_default_params()
+                loaded += 1
+            return loaded
+
+        loaded = 0
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            for skill_name in self.skill_map:
+                if skill_name in self.skill_params:
+                    continue
+                skill_df = self.logs_df[self.logs_df["skill_name"] == skill_name].copy()
+                if skill_df.empty:
+                    continue
+                skill_df = skill_df.sort_values(["user_id", "order_id"]).reset_index(drop=True)
+                skill_df["order_id"] = skill_df.groupby("user_id").cumcount() + 1
+                self.skill_params[skill_name] = self._calibrate_bkt_params(
+                    skill_df,
+                    trials=max(4, int(trials)),
+                )
+                loaded += 1
+        return loaded
 
     @staticmethod
     def _apply_bkt_observation(prior_mastery: float, p: dict[str, float], is_correct: int) -> float:
@@ -397,6 +601,7 @@ class ScienceBKT:
         skill_name: str,
         is_correct: int,
         response_time: Optional[float] = None,
+        persist: bool = True,
     ) -> dict[str, Any]:
         """
         Story 4: process a single interaction (one row), not a CSV batch.
@@ -423,15 +628,8 @@ class ScienceBKT:
         self._ensure_skill_params(skill_name)
         p = self.skill_params[skill_name]
         state_key = (user_id, skill_name)
+        state = self._hydrate_student_state(user_id, skill_name, float(p["prior"]))
 
-        if state_key not in self.student_state:
-            self.student_state[state_key] = {
-                "mastery": float(p["prior"]),
-                "attempts": 0,
-                "consecutive_incorrect": 0,
-            }
-
-        state = self.student_state[state_key]
         previous_mastery = float(state["mastery"])
         attempts = int(state["attempts"]) + 1
         prev_streak = int(state.get("consecutive_incorrect", 0))
@@ -465,6 +663,18 @@ class ScienceBKT:
             "consecutive_incorrect": consecutive_incorrect,
         }
         self.at_risk_flags[user_id][skill_name] = "At-Risk" if at_risk else "On-Track"
+        postgres_mastery = (
+            self._persist_student_state(
+                user_id,
+                skill_name,
+                mastery=new_mastery,
+                attempts=attempts,
+                consecutive_incorrect=consecutive_incorrect,
+                at_risk=at_risk,
+            )
+            if persist
+            else {"ok": False, "skipped": True, "reason": "persist=False"}
+        )
 
         return {
             "user_id": str(user_id),
@@ -482,6 +692,8 @@ class ScienceBKT:
             "mastery_decreased": bool(mastery_dropped),
             "three_consecutive_failures": bool(three_misses),
             "at_risk": bool(at_risk),
+            "postgres_mastery": postgres_mastery,
+            "params_source": self.params_source,
         }
 
     def get_mastery_update(self, user_id: str, skill_id: str, is_correct: int) -> dict[str, float | int | str]:
@@ -550,10 +762,8 @@ class ScienceBKT:
             raise ValueError(f"Unknown skill_name: {skill_name}. Run initialize_skills() first.")
         self._ensure_skill_params(skill_name)
         p = self.skill_params[skill_name]
-        state_key = (user_id, skill_name)
-        if state_key in self.student_state:
-            return float(self.student_state[state_key]["mastery"])
-        return float(p["prior"])
+        state = self._hydrate_student_state(user_id, skill_name, float(p["prior"]))
+        return float(state["mastery"])
 
     def get_skill_parameters(self, skill_name: str) -> dict[str, float]:
         """

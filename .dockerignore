@@ -1,0 +1,41 @@
+# Git / IDE
+.git
+.gitignore
+.cursor
+.cursorignore
+.idea
+.vscode
+
+# Python envs & caches
+.venv
+venv
+env
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.Python
+
+# Secrets — inject at runtime with --env-file / -e
+.env
+.env.*
+
+# Runtime / generated (rebuild or mount as volumes)
+.chroma_science_g6
+.chroma_science_g6_g9
+**/live_state_events.db
+**/interaction_logs.json
+evaluation_outputs
+outputs
+
+# Not needed for the FastAPI backend image
+Streamlit-UIs
+Scripts
+README- Documentation
+README.md
+Data/RP Proposal Documents
+Data/external
+**/Log_Problem.csv
+
+# Local test helpers (optional; keep image lean)
+FastAPI-Backend/test_*.py
+FastAPI-Backend/_inspect_tables.py

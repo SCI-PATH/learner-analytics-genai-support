@@ -1,5 +1,5 @@
 """
-Local RAG pipeline for the Grade 6 Science syllabus PDF (Epic 2 prep).
+Local RAG pipeline for Grade 6–9 Science syllabus PDFs.
 
 Uses LangChain for PDF loading and paragraph-aware chunking, ChromaDB (persistent
 client + local embeddings) for the vector store. No cloud API keys required.
@@ -9,11 +9,11 @@ Install (inside your project venv):
     pip install chromadb pypdf sentence-transformers
 
 Build / refresh the index:
-    python knowledge_base.py
+    python knowledge_base.py --rebuild
 
 Use from code:
     from knowledge_base import retrieve_context
-    facts = retrieve_context("G6_S8_ELE_CIRCUITS")
+    facts = retrieve_context("G8_C11_PHO_PROCESS")
 """
 
 from __future__ import annotations
@@ -23,101 +23,58 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-# --- Defaults (same folder as this file) ---
-_DEFAULT_PDF = "science G-6 E (1).pdf"
-_CHROMA_DIR = ".chroma_science_g6"
-_COLLECTION = "science_g6_syllabus"
-_EMBED_MODEL = "all-MiniLM-L6-v2"  # sentence-transformers id (Chroma embedding_fn)
+from curriculum_topics import (
+    FALLBACK_TOPIC_ID,
+    TOPIC_KEYWORDS,
+    TOPIC_QUERY_BOOST,
+    normalize_topic_id,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+_SYLLABUS_DIR = PROJECT_ROOT / "Data" / "Syllabi"
+_SYLLABUS_PDF_SPECS: list[tuple[Path, int]] = [
+    (_SYLLABUS_DIR / "Grade 6" / "science G-6 E (1).pdf", 6),
+    (_SYLLABUS_DIR / "Grade 7" / "science G-7 P-I E.pdf", 7),
+    (_SYLLABUS_DIR / "Grade 7" / "Grade_7_TextBook_English_Part_2.pdf", 7),
+    (_SYLLABUS_DIR / "Grade 8" / "science G8 P-I E.pdf", 8),
+    (_SYLLABUS_DIR / "Grade 8" / "science G-8 P-II E.pdf", 8),
+    (_SYLLABUS_DIR / "Grade 9" / "science G-9 P-I E.pdf", 9),
+    (_SYLLABUS_DIR / "Grade 9" / "Science Part II English G-9.pdf", 9),
+]
+_LEGACY_PDF_SPECS: list[tuple[Path, int]] = [
+    (_SYLLABUS_DIR / "science G-6 E (1).pdf", 6),
+    (_SYLLABUS_DIR / "science G-7 P-I E.pdf", 7),
+    (_SYLLABUS_DIR / "science G8 P-I E.pdf", 8),
+    (_SYLLABUS_DIR / "science G-9 P-I E.pdf", 9),
+]
+_CHROMA_DIR = PROJECT_ROOT / ".chroma_science_g6_g9"
+_COLLECTION = "science_syllabus_g6_g9"
+_EMBED_MODEL = "all-MiniLM-L6-v2"
 _CHROMA_ADD_BATCH = 256
 
-# Topic IDs used by the learner profile / Skill-Heirarchies → retrieval hints (syllabus-aligned).
-# Chunks are tagged with the best-matching topic_id by keyword overlap on the chunk text.
-_TOPIC_KEYWORDS: dict[str, list[str]] = {
-    "G6_S1_ORG_CLASS": [
-        "classification",
-        "classify",
-        "living things",
-        "organism",
-        "kingdom",
-        "vertebrate",
-        "invertebrate",
-    ],
-    "G6_S1_ORG_CHARS": [
-        "characteristics",
-        "living",
-        "movement",
-        "nutrition",
-        "respiration",
-        "reproduction",
-        "growth",
-        "excretion",
-        "sensitivity",
-    ],
-    "G6_S2_MAT_PROPS": [
-        "properties of matter",
-        "density",
-        "hardness",
-        "solubility",
-        "conductivity",
-        "melting",
-        "boiling",
-    ],
-    "G6_S2_MAT_STATES": [
-        "states of matter",
-        "solid",
-        "liquid",
-        "gas",
-        "particle",
-        "melting",
-        "freezing",
-        "evaporation",
-        "condensation",
-    ],
-    "G6_S4_ENE_SOURCES": [
-        "energy",
-        "source",
-        "renewable",
-        "non-renewable",
-        "fuel",
-        "fossil",
-        "solar",
-        "wind",
-    ],
-    "G6_S8_ELE_CIRCUITS": [
-        "electric circuit",
-        "circuit",
-        "current",
-        "switch",
-        "bulb",
-        "lamp",
-        "cell",
-        "battery",
-        "wire",
-        "series",
-        "parallel",
-    ],
-    "G6_S8_ELE_CONDINS": [
-        "conductor",
-        "insulator",
-        "conducting",
-        "insulating",
-        "metal",
-        "plastic",
-        "rubber",
-        "wood",
-    ],
-}
+# Re-export for modules that import keyword maps from knowledge_base.
+_TOPIC_KEYWORDS = TOPIC_KEYWORDS
+_TOPIC_QUERY_BOOST = TOPIC_QUERY_BOOST
 
-# Natural-language boost for semantic search when topic_id alone is sparse.
-_TOPIC_QUERY_BOOST: dict[str, str] = {
-    "G6_S1_ORG_CLASS": "Organisation of living things: classification and grouping organisms.",
-    "G6_S1_ORG_CHARS": "Characteristics of living things and life processes.",
-    "G6_S2_MAT_PROPS": "Physical and chemical properties of matter.",
-    "G6_S2_MAT_STATES": "States of matter, particles, and changes of state.",
-    "G6_S4_ENE_SOURCES": "Energy types and energy sources including renewable and non-renewable.",
-    "G6_S8_ELE_CIRCUITS": "Electric circuits, current, switches, cells, and lamps.",
-    "G6_S8_ELE_CONDINS": "Conductors and insulators in electricity.",
-}
+
+def _resolve_pdf_specs() -> list[tuple[Path, int]]:
+    specs = [(p, g) for p, g in _SYLLABUS_PDF_SPECS if p.is_file()]
+    if specs:
+        return specs
+    legacy = [(p, g) for p, g in _LEGACY_PDF_SPECS if p.is_file()]
+    if legacy:
+        return legacy
+    raise FileNotFoundError(
+        "No syllabus PDFs found under Data/Syllabi (Grade folders or root copies)."
+    )
+
+
+def _grade_from_topic_id(topic_id: str) -> Optional[int]:
+    match = re.match(r"^G(\d+)_", topic_id)
+    if not match:
+        return None
+    return int(match.group(1))
 
 
 def _score_chunk_for_topic(text: str, keywords: list[str]) -> int:
@@ -125,23 +82,27 @@ def _score_chunk_for_topic(text: str, keywords: list[str]) -> int:
     score = 0
     for kw in keywords:
         if kw.lower() in low:
-            score += low.count(kw.lower()) + 3  # bonus for any hit
+            score += low.count(kw.lower()) + 3
     return score
 
 
-def _infer_primary_topic_id(chunk_text: str) -> str:
-    best_id = "G6_GENERAL"
+def _infer_primary_topic_id(chunk_text: str, *, grade: Optional[int] = None) -> str:
+    """Tag a chunk with the best-matching curriculum topic (optionally same grade only)."""
+    best_id = f"G{grade}_GENERAL" if grade else "SCIENCE_GENERAL"
     best_score = 0
     for topic_id, kws in _TOPIC_KEYWORDS.items():
-        s = _score_chunk_for_topic(chunk_text, kws)
-        if s > best_score:
-            best_score = s
+        if grade is not None:
+            topic_grade = _grade_from_topic_id(topic_id)
+            if topic_grade != grade:
+                continue
+        score = _score_chunk_for_topic(chunk_text, kws)
+        if score > best_score:
+            best_score = score
             best_id = topic_id
     return best_id
 
 
 def _clean_page_text(text: str) -> str:
-    # Collapse broken lines from PDF extraction; keep paragraph boundaries.
     text = re.sub(r"-\s*\n", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[^\S\n]+", " ", text)
@@ -149,7 +110,6 @@ def _clean_page_text(text: str) -> str:
 
 
 def _chroma_safe_metadata(meta: dict[str, Any]) -> dict[str, Any]:
-    """Chroma metadata values must be str, int, float, or bool."""
     out: dict[str, Any] = {}
     for k, v in meta.items():
         if isinstance(v, (str, int, float, bool)):
@@ -163,18 +123,22 @@ def _chroma_safe_metadata(meta: dict[str, Any]) -> dict[str, Any]:
 
 class LocalScienceKnowledgeBase:
     """
-    Loads the Grade 6 syllabus PDF, chunks it, embeds into a local Chroma store,
-    and answers retrieve_context(topic_id) with similarity search + topic hints.
+    Loads Grade 6–9 syllabus PDFs, chunks them, embeds into a local Chroma store,
+    and answers retrieve_context(topic_id) with similarity search + metadata filters.
     """
 
     def __init__(
         self,
-        pdf_path: Optional[Path | str] = None,
+        pdf_specs: Optional[list[tuple[Path | str, int]]] = None,
         persist_directory: Optional[Path | str] = None,
     ) -> None:
-        self.base_dir = Path(__file__).resolve().parent
-        self.pdf_path = Path(pdf_path) if pdf_path else self.base_dir / _DEFAULT_PDF
-        self.persist_directory = Path(persist_directory) if persist_directory else self.base_dir / _CHROMA_DIR
+        self.base_dir = PROJECT_ROOT
+        if pdf_specs is None:
+            raw_specs = _resolve_pdf_specs()
+        else:
+            raw_specs = [(Path(p), int(g)) for p, g in pdf_specs]
+        self.pdf_specs = raw_specs
+        self.persist_directory = Path(persist_directory) if persist_directory else _CHROMA_DIR
         self._chroma_client: Any = None
         self._collection: Any = None
         self._embedding_fn: Any = None
@@ -211,16 +175,16 @@ class LocalScienceKnowledgeBase:
         return any(p.iterdir())
 
     def build_index(self, force_rebuild: bool = False) -> None:
-        """
-        Extract text from the PDF, split into paragraph-style chunks,
-        attach topic metadata, embed, and persist Chroma locally.
-        """
-        if not self.pdf_path.is_file():
-            raise FileNotFoundError(f"Syllabus PDF not found: {self.pdf_path}")
-
+        """Extract all syllabus PDFs, chunk, tag metadata, embed, and persist Chroma."""
         import chromadb
         from langchain_community.document_loaders import PyPDFLoader
         from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+        if not self.pdf_specs:
+            raise FileNotFoundError("No syllabus PDF specs configured.")
+        for pdf_path, _grade in self.pdf_specs:
+            if not pdf_path.is_file():
+                raise FileNotFoundError(f"Syllabus PDF not found: {pdf_path}")
 
         if force_rebuild and self.persist_directory.is_dir():
             import shutil
@@ -230,24 +194,29 @@ class LocalScienceKnowledgeBase:
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         self._reset_chroma_handles()
 
-        loader = PyPDFLoader(str(self.pdf_path))
-        pages = loader.load()
-        for doc in pages:
-            doc.page_content = _clean_page_text(doc.page_content)
-
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1200,
             chunk_overlap=200,
             length_function=len,
             separators=["\n\n\n", "\n\n", "\n", ". ", " ", ""],
         )
-        splits = splitter.split_documents(pages)
 
-        for doc in splits:
-            primary = _infer_primary_topic_id(doc.page_content)
-            doc.metadata = dict(doc.metadata)
-            doc.metadata["topic_id_primary"] = primary
-            doc.metadata["source_pdf"] = self.pdf_path.name
+        all_splits: list[Any] = []
+        for pdf_path, grade in self.pdf_specs:
+            loader = PyPDFLoader(str(pdf_path))
+            pages = loader.load()
+            for doc in pages:
+                doc.page_content = _clean_page_text(doc.page_content)
+
+            splits = splitter.split_documents(pages)
+            for doc in splits:
+                primary = _infer_primary_topic_id(doc.page_content, grade=grade)
+                doc.metadata = dict(doc.metadata)
+                doc.metadata["topic_id_primary"] = primary
+                doc.metadata["source_pdf"] = pdf_path.name
+                doc.metadata["grade"] = grade
+            all_splits.extend(splits)
+            print(f"  chunked {pdf_path.name}: {len(splits)} chunks (grade {grade})")
 
         client = chromadb.PersistentClient(path=str(self.persist_directory))
         try:
@@ -262,8 +231,9 @@ class LocalScienceKnowledgeBase:
         ids: list[str] = []
         documents: list[str] = []
         metadatas: list[dict[str, Any]] = []
-        for i, doc in enumerate(splits):
-            ids.append(f"g6_chunk_{i:06d}")
+        for i, doc in enumerate(all_splits):
+            grade = doc.metadata.get("grade", 0)
+            ids.append(f"g{grade}_chunk_{i:06d}")
             documents.append(doc.page_content)
             metadatas.append(_chroma_safe_metadata(doc.metadata))
 
@@ -273,66 +243,70 @@ class LocalScienceKnowledgeBase:
 
         self._chroma_client = client
         self._collection = col
+        print(f"Indexed {len(ids)} chunks from {len(self.pdf_specs)} PDFs -> {self.persist_directory}")
 
     def _ensure_collection_loaded(self) -> Any:
         if not self._index_ready():
             raise FileNotFoundError(
-                f"No vector index at {self.persist_directory}. Run: python knowledge_base.py"
+                f"No vector index at {self.persist_directory}. Run: python knowledge_base.py --rebuild"
             )
         return self._get_chroma_collection()
 
     def ensure_index(self, force_rebuild: bool = False) -> None:
         if force_rebuild or not self._index_ready():
-            self.build_index(force_rebuild=force_rebuild)
-        self._ensure_collection_loaded()
+            self.build_index(force_rebuild=True)
 
     def retrieve_context(self, topic_id: str, k: int = 5) -> dict[str, Any]:
-        """
-        Return the most relevant syllabus excerpts for a curriculum topic_id.
-
-        Output is JSON-serializable (strings, ints, lists of dicts).
-        """
-        self.ensure_index()
+        """Return syllabus excerpts for a curriculum topic_id (metadata-filtered when possible)."""
+        topic_id = normalize_topic_id(topic_id)
         col = self._ensure_collection_loaded()
-
+        grade = _grade_from_topic_id(topic_id)
         boost = _TOPIC_QUERY_BOOST.get(
             topic_id,
-            f"Grade 6 science. Topic code {topic_id}.",
+            f"Grade {grade or ''} science. Topic code {topic_id}.",
         )
         query = f"{topic_id} {boost}"
 
-        def _rows_from_chroma_result(res: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-            docs_batch = (res.get("documents") or [[]])[0] or []
-            metas_batch = (res.get("metadatas") or [[]])[0] or []
-            rows: list[tuple[str, dict[str, Any]]] = []
-            for i, text in enumerate(docs_batch):
-                meta = metas_batch[i] if i < len(metas_batch) else {}
-                rows.append((text, dict(meta) if isinstance(meta, dict) else {}))
-            return rows
+        def _where_filter() -> Optional[dict[str, Any]]:
+            if grade is not None:
+                return {"$and": [{"topic_id_primary": topic_id}, {"grade": grade}]}
+            return {"topic_id_primary": topic_id}
 
-        filtered_rows: list[tuple[str, dict[str, Any]]] = []
         try:
-            fr = col.query(
+            res = col.query(
                 query_texts=[query],
-                n_results=k,
-                where={"topic_id_primary": topic_id},
+                n_results=max(k * 3, 8),
+                where=_where_filter(),
             )
-            filtered_rows = _rows_from_chroma_result(fr)
         except Exception:
-            filtered_rows = []
+            res = col.query(query_texts=[query], n_results=max(k * 3, 8))
 
-        if len(filtered_rows) < max(2, k // 2):
-            br = col.query(query_texts=[query], n_results=k)
-            broad_rows = _rows_from_chroma_result(br)
-            seen = {t for t, _ in filtered_rows}
-            for text, meta in broad_rows:
-                if text not in seen:
-                    filtered_rows.append((text, meta))
-                    seen.add(text)
-                if len(filtered_rows) >= k:
-                    break
-        else:
-            filtered_rows = filtered_rows[:k]
+        docs = (res.get("documents") or [[]])[0]
+        metas = (res.get("metadatas") or [[]])[0]
+        filtered_rows: list[tuple[str, dict[str, Any]]] = []
+        for text, meta in zip(docs, metas):
+            filtered_rows.append((text or "", dict(meta or {})))
+
+        if not filtered_rows and grade is not None:
+            try:
+                res2 = col.query(
+                    query_texts=[query],
+                    n_results=max(k * 3, 8),
+                    where={"grade": grade},
+                )
+                docs2 = (res2.get("documents") or [[]])[0]
+                metas2 = (res2.get("metadatas") or [[]])[0]
+                for text, meta in zip(docs2, metas2):
+                    filtered_rows.append((text or "", dict(meta or {})))
+            except Exception:
+                pass
+
+        if not filtered_rows:
+            res3 = col.query(query_texts=[query], n_results=k)
+            docs3 = (res3.get("documents") or [[]])[0]
+            metas3 = (res3.get("metadatas") or [[]])[0]
+            for text, meta in zip(docs3, metas3):
+                filtered_rows.append((text or "", dict(meta or {})))
 
         contexts: list[dict[str, Any]] = []
         for rank, (page_content, doc_meta) in enumerate(filtered_rows[:k], start=1):
@@ -340,13 +314,7 @@ class LocalScienceKnowledgeBase:
                 str(a): (b if isinstance(b, (str, int, float, bool)) else str(b))
                 for a, b in doc_meta.items()
             }
-            contexts.append(
-                {
-                    "rank": rank,
-                    "text": page_content,
-                    "metadata": meta,
-                }
-            )
+            contexts.append({"rank": rank, "text": page_content, "metadata": meta})
 
         merged_text = "\n\n---\n\n".join(c["text"] for c in contexts)
 
@@ -370,34 +338,29 @@ def get_knowledge_base() -> LocalScienceKnowledgeBase:
 
 
 def retrieve_context(topic_id: str, *, k: int = 5) -> dict[str, Any]:
-    """
-    Module-level helper for FastAPI / other modules.
-    Builds the index on first use if `.chroma_science_g6` is missing.
-    """
-    return get_knowledge_base().retrieve_context(topic_id, k=k)
+    """Module-level helper; builds index on first use if `.chroma_science_g6_g9` is missing."""
+    return get_knowledge_base().retrieve_context(normalize_topic_id(topic_id), k=k)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build or query local Grade 6 science RAG index.")
-    parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="Delete existing Chroma data and rebuild from PDF.",
-    )
+    parser = argparse.ArgumentParser(description="Build or query local Grade 6–9 science RAG index.")
+    parser.add_argument("--rebuild", action="store_true", help="Delete existing Chroma data and rebuild.")
     parser.add_argument(
         "--topic",
         type=str,
         default=None,
-        help="If set, run retrieve_context(topic) after build (e.g. G6_S8_ELE_CIRCUITS).",
+        help="If set, run retrieve_context(topic) after build (e.g. G8_C11_PHO_PROCESS).",
     )
     args = parser.parse_args()
     kb = LocalScienceKnowledgeBase()
     kb.ensure_index(force_rebuild=args.rebuild)
-    print(f"Index ready at {kb.persist_directory}")
+    print(f"Index ready at {kb.persist_directory} ({len(kb.pdf_specs)} PDFs)")
     if args.topic:
         out = kb.retrieve_context(args.topic, k=4)
         print("--- sample facts_text (truncated) ---")
         print(out["facts_text"][:1500] + ("..." if len(out["facts_text"]) > 1500 else ""))
+    else:
+        print(f"Fallback topic: {FALLBACK_TOPIC_ID}")
 
 
 if __name__ == "__main__":

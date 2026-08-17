@@ -1,17 +1,21 @@
 """
 Epic 4: Educator Insight Dashboard (Streamlit)
 
-Classroom Mastery Heatmap:
+Classroom Mastery Heatmap (high-density G6–G9):
 - Calls FastAPI endpoint /api/v1/mastery/matrix for real mastery scores.
-- Shows students (rows) vs topics (columns).
-- Color bands:
-  * Red    : < 0.50
-  * Orange : 0.50 - 0.79
-  * Green  : >= 0.80
+- Dynamically loads all topic columns from Data/Skill-Heirarchies-G6-G9-Full-Chapters.xlsx.
+- Horizontal overflow for full G6–G9 grids (chapter-aligned topic IDs).
+- Strict BKT color bands:
+  * Red    : < 0.50  (At Risk)
+  * Orange : 0.50 - 0.79  (Learning)
+  * Green  : >= 0.80  (Mastered)
 """
 
 from __future__ import annotations
 
+import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -20,8 +24,23 @@ import requests
 import streamlit as st
 
 
-DEFAULT_API_BASE = "http://127.0.0.1:8000"
-DEFAULT_API_TIMEOUT_S = 90.0
+DEFAULT_API_BASE = "http://127.0.0.1:8003"
+DEFAULT_API_TIMEOUT_S = 60.0
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SKILL_HIERARCHY_CANDIDATES = [
+    PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9-Full-Chapters.xlsx",
+    PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9-UPDATED.xlsx",
+    PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9.xlsx",
+]
+SKILL_HIERARCHY_XLSX = next(
+    (p for p in SKILL_HIERARCHY_CANDIDATES if p.is_file()),
+    SKILL_HIERARCHY_CANDIDATES[-1],
+)
+_TOPIC_ID_RE = re.compile(r"^G[6-9]_", re.IGNORECASE)
+
+# Strict BKT mastery boundaries (probability scale).
+BKT_MASTERED = 0.80
+BKT_LEARNING = 0.50
 
 DEFAULT_STUDENTS = [
     "user_001",
@@ -31,40 +50,66 @@ DEFAULT_STUDENTS = [
     "user_005",
 ]
 
-DEFAULT_TOPICS = [
-    "G6_S1_ORG_CHARS",
-    "G6_S1_ORG_CLASS",
-    "G6_S2_MAT_PROPS",
-    "G6_S2_MAT_STATES",
-    "G6_S4_ENE_SOURCES",
-    "G6_S8_ELE_CIRCUITS",
-    "G6_S8_ELE_CONDINS",
-]
+
+@lru_cache(maxsize=1)
+def _load_skill_hierarchy() -> tuple[tuple[str, ...], dict[str, str]]:
+    """Load topic IDs and display labels from the merged G6–G9 skill hierarchy."""
+    fallback_topics = (
+        "G6_C1_ORG_CHARS",
+        "G6_C1_ORG_DIFF",
+        "G6_C2_MAT_STATES",
+        "G6_C2_MAT_PROPS",
+        "G6_C4_ENE_SOURCES",
+        "G6_C8_ELE_CIRCUITS",
+        "G6_C8_ELE_CONDINS",
+    )
+    fallback_labels = {tid: tid for tid in fallback_topics}
+    if not SKILL_HIERARCHY_XLSX.is_file():
+        return fallback_topics, fallback_labels
+
+    df = pd.read_excel(SKILL_HIERARCHY_XLSX, sheet_name=0)
+    # Support both old and new column names for the canonical topic ID.
+    topic_col = None
+    for col in df.columns:
+        name = str(col)
+        low = name.lower()
+        if "topic" in low and "id" in low:
+            topic_col = name
+            break
+    ref_col = "Curriculum Reference" if "Curriculum Reference" in df.columns else None
+    if topic_col is None:
+        return fallback_topics, fallback_labels
+
+    topics: list[str] = []
+    labels: dict[str, str] = {}
+    for _, row in df.iterrows():
+        tid = str(row.get(topic_col) or "").strip()
+        if not tid or not _TOPIC_ID_RE.match(tid):
+            continue
+        topics.append(tid)
+        ref = str(row.get(ref_col) or "").strip() if ref_col else ""
+        labels[tid] = ref if ref else tid
+
+    unique_topics = list(dict.fromkeys(topics))
+    if not unique_topics:
+        return fallback_topics, fallback_labels
+    return tuple(unique_topics), labels
 
 
-TOPIC_LABELS = {
-    "G6_S1_ORG_CHARS": "Organisms: Characteristics",
-    "G6_S1_ORG_CLASS": "Organisms: Classification",
-    "G6_S2_MAT_PROPS": "Materials: Properties",
-    "G6_S2_MAT_STATES": "Materials: States of Matter",
-    "G6_S4_ENE_SOURCES": "Energy: Sources",
-    "G6_S8_ELE_CIRCUITS": "Electricity: Circuits",
-    "G6_S8_ELE_CONDINS": "Electricity: Conductors vs Insulators",
-}
+DEFAULT_TOPICS: list[str] = list(_load_skill_hierarchy()[0])
+TOPIC_LABELS: dict[str, str] = dict(_load_skill_hierarchy()[1])
 
 
 def fetch_mastery_matrix(
     api_base: str,
     student_ids: list[str],
     topic_ids: list[str],
-    mode: str,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/mastery/matrix"
     payload = {
         "student_ids": student_ids,
         "topic_ids": topic_ids,
-        "mode": mode,
     }
     resp = requests.post(url, json=payload, timeout=timeout_s)
     resp.raise_for_status()
@@ -75,14 +120,12 @@ def fetch_at_risk_students(
     api_base: str,
     student_ids: list[str],
     topic_ids: list[str],
-    mode: str,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/analytics/at-risk-students"
     payload = {
         "student_ids": student_ids,
         "topic_ids": topic_ids,
-        "mode": mode,
     }
     resp = requests.post(url, json=payload, timeout=timeout_s)
     resp.raise_for_status()
@@ -92,11 +135,10 @@ def fetch_at_risk_students(
 def fetch_student_profile(
     api_base: str,
     user_id: str,
-    mode: str,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/analytics/student-profile/{user_id}"
-    resp = requests.get(url, params={"mode": mode}, timeout=timeout_s)
+    resp = requests.get(url, timeout=timeout_s)
     resp.raise_for_status()
     return resp.json()
 
@@ -106,7 +148,7 @@ def matrix_to_dataframe(
     topic_ids: list[str],
 ) -> pd.DataFrame:
     df = pd.DataFrame.from_dict(mastery_matrix, orient="index")
-    # Keep teacher-selected column order.
+    # Keep teacher-selected column order (Excel hierarchy order).
     missing_cols = [t for t in topic_ids if t not in df.columns]
     for col in missing_cols:
         df[col] = 0.0
@@ -120,6 +162,18 @@ def _topic_label(topic_id: str) -> str:
     return TOPIC_LABELS.get(topic_id, topic_id)
 
 
+def _header_label(topic_id: str, *, dense: bool) -> str:
+    """
+    Dense grids use compact topic IDs on the axis; full curriculum names live in hover.
+    """
+    if dense:
+        return topic_id
+    label = _topic_label(topic_id)
+    if len(label) > 28:
+        return label[:25] + "…"
+    return label
+
+
 def _risk_tier(score: int) -> tuple[str, str]:
     if score >= 80:
         return "Immediate Support", "#7f1d1d"
@@ -131,29 +185,37 @@ def _risk_tier(score: int) -> tuple[str, str]:
 
 
 def build_heatmap(df: pd.DataFrame, title: str) -> go.Figure:
-    # Teacher-facing percentage view (0-100) while preserving the same thresholds.
-    z = (df * 100.0).to_numpy()
-    x_ids = list(df.columns)
-    x = [_topic_label(t) for t in x_ids]
-    y = list(df.index)
+    """
+    High-density mastery heatmap with strict 3-band BKT coloring.
 
-    # Piecewise colors for richer teacher-facing bands:
-    # [0,35) deep red, [35,50) light red,
-    # [50,65) amber, [65,80) yellow-green, [80,100] green
+    Column headers are topic IDs (from Excel) to prevent overlap; curriculum
+    references appear in hover text. Chart width scales with column count so the
+    Streamlit scroll wrapper can pan horizontally.
+    """
+    n_topics = max(1, len(df.columns))
+    dense = n_topics >= 12
+    z = df.to_numpy(dtype=float)
+    x_ids = list(df.columns)
+    x = [_header_label(t, dense=dense) for t in x_ids]
+    y = list(df.index)
+    custom = [[_topic_label(t) for t in x_ids] for _ in y]
+
+    # Strict piecewise scale on probability [0, 1]:
+    # <0.50 red | 0.50–0.79 orange | >=0.80 green
     colorscale = [
-        [0.00, "#991b1b"],
-        [0.3499, "#991b1b"],
-        [0.35, "#dc2626"],
+        [0.00, "#dc2626"],
         [0.4999, "#dc2626"],
         [0.50, "#f59e0b"],
-        [0.6499, "#f59e0b"],
-        [0.65, "#eab308"],
-        [0.7999, "#eab308"],
+        [0.7999, "#f59e0b"],
         [0.80, "#16a34a"],
-        [1.00, "#2ca02c"],
+        [1.00, "#16a34a"],
     ]
 
-    text = [[f"{v:.0f}%" for v in row] for row in z]
+    text = [[f"{v * 100:.0f}" for v in row] for row in z]
+    col_px = 78 if dense else 110
+    chart_width = max(960, 140 + col_px * n_topics)
+    chart_height = max(360, 110 + 42 * max(1, len(y)))
+
     fig = go.Figure(
         data=go.Heatmap(
             z=z,
@@ -161,36 +223,125 @@ def build_heatmap(df: pd.DataFrame, title: str) -> go.Figure:
             y=y,
             text=text,
             texttemplate="%{text}",
+            textfont=dict(size=10 if dense else 12, color="#111827"),
+            customdata=custom,
             colorscale=colorscale,
             zmin=0.0,
-            zmax=100.0,
+            zmax=1.0,
+            xgap=1,
+            ygap=1,
             colorbar=dict(
-                title="Mastery (%)",
-                tickvals=[18, 43, 58, 72, 90],
+                title="BKT P(L)",
+                tickvals=[0.25, 0.65, 0.90],
                 ticktext=[
-                    "🆘 Critical (0-34%)",
-                    "🔴 High Risk (35-49%)",
-                    "🟠 Support (50-64%)",
-                    "🟡 Progressing (65-79%)",
-                    "🟢 Strong (80-100%)",
+                    "🔴 At Risk (<50%)",
+                    "🟠 Learning (50–79%)",
+                    "🟢 Mastered (≥80%)",
                 ],
+                len=0.85,
             ),
-            hovertemplate="Student: %{y}<br>Topic: %{x}<br>Mastery: %{z:.1f}%<extra></extra>",
+            hovertemplate=(
+                "Student: %{y}<br>"
+                "Topic ID: %{x}<br>"
+                "Curriculum: %{customdata}<br>"
+                "Mastery: %{z:.1%}<extra></extra>"
+            ),
         )
     )
     fig.update_layout(
-        title=title,
-        xaxis_title="Science Topics",
+        title=dict(text=title, font=dict(size=16)),
+        xaxis_title="Science Topics (from Skill-Heirarchies-G6-G9.xlsx)",
         yaxis_title="Student IDs",
-        margin=dict(l=60, r=40, t=70, b=60),
-        height=max(420, 70 + 45 * max(1, len(y))),
+        margin=dict(l=90, r=30, t=60, b=160 if dense else 100),
+        width=chart_width,
+        height=chart_height,
         paper_bgcolor="#ffffff",
-        plot_bgcolor="#fffdf8",
-        font=dict(size=14),
+        plot_bgcolor="#f8fafc",
+        font=dict(size=12),
     )
-    fig.update_xaxes(tickangle=-22, tickfont=dict(size=12))
-    fig.update_yaxes(tickfont=dict(size=12))
+    fig.update_xaxes(
+        tickangle=-90 if dense else -35,
+        tickfont=dict(size=9 if dense else 11),
+        automargin=True,
+        side="bottom",
+        type="category",
+        categoryorder="array",
+        categoryarray=x,
+    )
+    fig.update_yaxes(
+        tickfont=dict(size=11),
+        automargin=True,
+        type="category",
+        categoryorder="array",
+        categoryarray=y,
+        autorange="reversed",
+    )
     return fig
+
+
+def style_mastery_dataframe(df_prob: pd.DataFrame) -> Any:
+    """Percentage table with strict BKT cell background / text colors."""
+    df_pct = (df_prob * 100.0).copy()
+    df_pct.index.name = "student_id"
+
+    def _cell_style(val: Any) -> str:
+        try:
+            score = float(val)
+        except (TypeError, ValueError):
+            return "background-color: #e5e7eb; color: #111827;"
+        if score >= BKT_MASTERED * 100:
+            return "background-color: #16a34a; color: #ffffff; font-weight: 600;"
+        if score >= BKT_LEARNING * 100:
+            return "background-color: #f59e0b; color: #111827; font-weight: 600;"
+        return "background-color: #dc2626; color: #ffffff; font-weight: 600;"
+
+    styler = (
+        df_pct.style.format("{:.0f}%")
+        .map(_cell_style)
+        .set_table_styles(
+            [
+                {
+                    "selector": "th.col_heading",
+                    "props": [
+                        ("writing-mode", "vertical-rl"),
+                        ("transform", "rotate(180deg)"),
+                        ("white-space", "nowrap"),
+                        ("font-size", "0.72rem"),
+                        ("max-width", "2.2rem"),
+                        ("min-width", "2.0rem"),
+                        ("vertical-align", "bottom"),
+                        ("padding", "6px 2px"),
+                        ("background", "#f1f5f9"),
+                    ],
+                },
+                {
+                    "selector": "th.row_heading",
+                    "props": [
+                        ("position", "sticky"),
+                        ("left", "0"),
+                        ("z-index", "2"),
+                        ("background", "#f8fafc"),
+                        ("font-size", "0.85rem"),
+                        ("white-space", "nowrap"),
+                    ],
+                },
+                {
+                    "selector": "td",
+                    "props": [
+                        ("min-width", "3.1rem"),
+                        ("text-align", "center"),
+                        ("font-size", "0.78rem"),
+                        ("padding", "4px 2px"),
+                    ],
+                },
+                {
+                    "selector": "table",
+                    "props": [("border-collapse", "separate"), ("border-spacing", "1px")],
+                },
+            ]
+        )
+    )
+    return styler
 
 
 def parse_lines(text: str) -> list[str]:
@@ -217,6 +368,44 @@ def main() -> None:
   border-radius: 12px;
   padding: 10px 12px;
   background: linear-gradient(180deg, #ffffff 0%, #f9fafb 100%);
+}
+.band-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 12px 0;
+}
+.band-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #fff;
+}
+.matrix-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 8px 8px 4px 8px;
+  box-shadow: inset 0 1px 0 rgba(15, 23, 42, 0.04);
+}
+.matrix-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+.matrix-scroll::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 999px;
+}
+.matrix-hint {
+  color: #64748b;
+  font-size: 0.84rem;
+  margin: 4px 0 8px 0;
 }
 .risk-card {
   border: 1px solid #fca5a5;
@@ -276,18 +465,25 @@ def main() -> None:
   font-size: 0.94rem;
   line-height: 1.35;
 }
+/* Keep Streamlit dataframe / HTML tables horizontally scrollable */
+div[data-testid="stDataFrame"] {
+  overflow-x: auto !important;
+}
+div[data-testid="stDataFrame"] table {
+  width: max-content !important;
+}
 </style>
         """,
         unsafe_allow_html=True,
     )
     st.markdown('<div class="main-title">📘 Educator Insight Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="subtitle">Track mastery, at-risk alerts, and conversational engagement in one view.</div>',
+        '<div class="subtitle">High-density G6–G9 mastery matrix (57 topics), at-risk alerts, and conversational engagement.</div>',
         unsafe_allow_html=True,
     )
 
     with st.sidebar:
-        st.header("⚙️ Data Source")
+        st.header("⚙️ API")
         api_base = st.text_input("FastAPI Base URL", value=DEFAULT_API_BASE)
         api_timeout_s = st.number_input(
             "API timeout (seconds)",
@@ -295,18 +491,8 @@ def main() -> None:
             max_value=300.0,
             value=DEFAULT_API_TIMEOUT_S,
             step=5.0,
-            help="Increase this if replay_logs requests are slow.",
         )
-        mode = st.selectbox(
-            "Mastery source mode",
-            options=["replay_logs", "live_state"],
-            index=0,
-            help=(
-                "replay_logs = recompute mastery by replaying synthetic logs "
-                "(recommended baseline). "
-                "live_state = current in-memory engine state since server start."
-            ),
-        )
+        st.caption("Analytics use **live BKT state** (Postgres + in-memory events since server start).")
 
         st.header("🧪 Classroom Slice")
         students_text = st.text_area(
@@ -314,11 +500,23 @@ def main() -> None:
             value="\n".join(DEFAULT_STUDENTS),
             height=150,
         )
-        topics_text = st.text_area(
-            "Topic IDs (one per line)",
-            value="\n".join(DEFAULT_TOPICS),
-            height=180,
+        use_all_topics = st.checkbox(
+            f"Use all hierarchy topics ({len(DEFAULT_TOPICS)} from Excel)",
+            value=True,
+            help="Loads topic columns from Data/Skill-Heirarchies-G6-G9.xlsx in curriculum order.",
         )
+        if use_all_topics:
+            topic_ids_ui = list(DEFAULT_TOPICS)
+            st.caption(f"Loaded `{SKILL_HIERARCHY_XLSX.name}` → {len(topic_ids_ui)} topic columns.")
+            with st.expander("Preview topic IDs", expanded=False):
+                st.code("\n".join(topic_ids_ui), language="text")
+        else:
+            topics_text = st.text_area(
+                "Topic IDs (one per line)",
+                value="\n".join(DEFAULT_TOPICS[:12]),
+                height=180,
+            )
+            topic_ids_ui = parse_lines(topics_text)
         run = st.button("🔄 Refresh Dashboard Data", type="primary")
 
     # Auto-load once on first render so the dashboard isn't blank.
@@ -329,7 +527,7 @@ def main() -> None:
         st.session_state.dashboard_data = None
 
     student_ids = parse_lines(students_text)
-    topic_ids = parse_lines(topics_text)
+    topic_ids = topic_ids_ui
     if not student_ids or not topic_ids:
         st.error("Please provide at least one student ID and one topic ID.")
         return
@@ -337,19 +535,17 @@ def main() -> None:
     should_reload = bool(run) or st.session_state.dashboard_data is None
     if should_reload:
         try:
-            with st.spinner("Loading mastery and at-risk analytics..."):
+            with st.spinner("Loading live mastery and at-risk analytics…"):
                 payload = fetch_mastery_matrix(
                     api_base,
                     student_ids,
                     topic_ids,
-                    mode=mode,
                     timeout_s=float(api_timeout_s),
                 )
                 risk_payload = fetch_at_risk_students(
                     api_base,
                     student_ids,
                     topic_ids,
-                    mode=mode,
                     timeout_s=float(api_timeout_s),
                 )
         except requests.RequestException as exc:
@@ -364,7 +560,6 @@ def main() -> None:
             "risk_payload": risk_payload,
             "student_ids": student_ids,
             "topic_ids": topic_ids,
-            "mode": mode,
             "api_base": api_base,
             "api_timeout_s": float(api_timeout_s),
         }
@@ -374,7 +569,6 @@ def main() -> None:
         risk_payload = data["risk_payload"]
         student_ids = data["student_ids"]
         topic_ids = data["topic_ids"]
-        mode = data["mode"]
         api_base = data["api_base"]
         api_timeout_s = data["api_timeout_s"]
 
@@ -385,12 +579,21 @@ def main() -> None:
         st.error(f"At-risk analytics API returned an error: {risk_payload}")
         return
 
-    c1, c2 = st.columns([2, 1])
-    with c2:
-        st.markdown(
-            f'<div class="soft-card"><b>Mode:</b> {mode}<br/><b>Students:</b> {len(student_ids)} | <b>Topics:</b> {len(topic_ids)}</div>',
-            unsafe_allow_html=True,
-        )
+    df = matrix_to_dataframe(payload["mastery_matrix"], topic_ids=topic_ids)
+    mastered_n = int((df >= BKT_MASTERED).sum().sum())
+    learning_n = int(((df >= BKT_LEARNING) & (df < BKT_MASTERED)).sum().sum())
+    at_risk_n = int((df < BKT_LEARNING).sum().sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Students × Topics", f"{len(student_ids)} × {len(topic_ids)}")
+    c2.metric("🟢 Mastered cells", mastered_n)
+    c3.metric("🟠 Learning cells", learning_n)
+    c4.metric("🔴 At-Risk cells", at_risk_n)
+    st.markdown(
+        f'<div class="soft-card"><b>Data source:</b> live_state (Postgres + API events) &nbsp;|&nbsp; '
+        f"<b>Hierarchy source:</b> <code>{SKILL_HIERARCHY_XLSX.name}</code></div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("## ⚠️ Priority Alerts: Students At-Risk")
     alerts = list(risk_payload.get("students") or [])
@@ -457,7 +660,7 @@ def main() -> None:
                 )
 
     st.divider()
-    st.subheader("🌡️ Classroom Mastery Heatmap")
+    st.subheader("🌡️ Classroom Mastery Matrix (High-Density)")
     unknown = payload.get("unknown_topic_ids") or []
     if unknown:
         st.warning(
@@ -465,23 +668,58 @@ def main() -> None:
             + ", ".join(map(str, unknown))
         )
 
-    df = matrix_to_dataframe(payload["mastery_matrix"], topic_ids=topic_ids)
-    fig = build_heatmap(df, title=f"Classroom Mastery Heatmap ({payload.get('mode')})")
-    st.plotly_chart(fig, use_container_width=True)
-
     st.markdown(
         """
-**Legend**
-- 🆘 **Critical Alert** (`0% - 34%`): Immediate intervention needed.
-- 🔴 **High Risk** (`35% - 49%`): Strong support required this week.
-- 🟠 **Support Zone** (`50% - 64%`): Reinforce concepts with guided practice.
-- 🟡 **Progressing** (`65% - 79%`): Encourage continued practice and challenge.
-- 🟢 **Strong Mastery** (`80% - 100%`): Student is on track for independent tasks.
-"""
+<div class="band-legend">
+  <span class="band-pill" style="background:#dc2626;">🔴 At Risk — P(L) &lt; 0.50</span>
+  <span class="band-pill" style="background:#f59e0b; color:#111827;">🟠 Learning — 0.50 ≤ P(L) ≤ 0.79</span>
+  <span class="band-pill" style="background:#16a34a;">🟢 Mastered — P(L) ≥ 0.80</span>
+</div>
+<div class="matrix-hint">Scroll horizontally inside the frames below to inspect all topic columns without overlapping headers.</div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    # Teacher-readable table in percentage format.
-    st.dataframe((df * 100.0).style.format("{:.1f}%"), use_container_width=True)
+    fig = build_heatmap(
+        df,
+        title=f"Classroom Mastery Heatmap · {len(topic_ids)} topics · live_state",
+    )
+    st.markdown('<div class="matrix-scroll">', unsafe_allow_html=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=False,
+        config={
+            "displayModeBar": True,
+            "scrollZoom": True,
+            "responsive": False,
+        },
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("#### Mastery grid (scrollable)")
+    st.caption(
+        "Cell colors follow the same strict BKT bands. Column headers are topic IDs from "
+        "`Skill-Heirarchies-G6-G9.xlsx` (rotated to fit 57 columns)."
+    )
+    st.dataframe(
+        style_mastery_dataframe(df),
+        use_container_width=False,
+        height=min(520, 80 + 36 * max(1, len(df.index))),
+    )
+
+    with st.expander("Curriculum reference key (topic_id → label)", expanded=False):
+        key_df = pd.DataFrame(
+            {
+                "topic_id": topic_ids,
+                "curriculum_reference": [_topic_label(t) for t in topic_ids],
+                "band_counts_mastered": [(df[t] >= BKT_MASTERED).sum() for t in topic_ids],
+                "band_counts_learning": [
+                    ((df[t] >= BKT_LEARNING) & (df[t] < BKT_MASTERED)).sum() for t in topic_ids
+                ],
+                "band_counts_at_risk": [(df[t] < BKT_LEARNING).sum() for t in topic_ids],
+            }
+        )
+        st.dataframe(key_df, use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("🧠 Student Deep-Dive (Micro-Interaction Logs)")
@@ -499,7 +737,6 @@ def main() -> None:
             profile = fetch_student_profile(
                 api_base=api_base,
                 user_id=str(selected_student),
-                mode=mode,
                 timeout_s=float(api_timeout_s),
             )
     except requests.RequestException as exc:
@@ -516,6 +753,14 @@ def main() -> None:
     e2.metric("Assessment attempts", int(profile.get("assessment_insights", {}).get("attempts_count") or 0))
     f_avg = profile.get("engagement_metrics", {}).get("average_frustration_cue")
     e3.metric("Avg frustration cue", f"{float(f_avg):.2f}" if f_avg is not None else "N/A")
+
+    # Per-selected-student band summary across the dense matrix row
+    if selected_student in df.index:
+        row = df.loc[selected_student]
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Topics mastered", int((row >= BKT_MASTERED).sum()))
+        s2.metric("Topics learning", int(((row >= BKT_LEARNING) & (row < BKT_MASTERED)).sum()))
+        s3.metric("Topics at risk", int((row < BKT_LEARNING).sum()))
 
     timeline = list(profile.get("mastery_timeline_last_10_attempts") or [])
     engagement_timeline = list(profile.get("engagement_timeline_last_10_turns") or [])
@@ -610,6 +855,12 @@ def main() -> None:
                 "Student is participating well in dialogue but struggling with formal assessments."
             )
 
+    distractor_source = (profile.get("meta") or {}).get("distractor_source")
+    if distractor_source == "question_engine_live":
+        st.caption("Misconception Cloud uses live Question Engine distractor labels.")
+    elif distractor_source:
+        st.caption("Misconception Cloud aggregates distractor labels from live Question Engine attempts.")
+
     misconceptions_df = pd.DataFrame(profile.get("assessment_insights", {}).get("most_frequent_distractor_tags") or [])
     if not misconceptions_df.empty:
         misconceptions_df = misconceptions_df.sort_values("count", ascending=False)
@@ -656,7 +907,10 @@ def main() -> None:
                 st.divider()
         flagged = list(profile.get("critical_confusion_turns") or [])
         if flagged:
-            st.warning(f"Misconception Tracker: {len(flagged)} critical confusion turn(s) detected (interaction_score < 0.30).")
+            st.warning(
+                f"Misconception Tracker: {len(flagged)} critical confusion turn(s) detected "
+                "(interaction_score < 0.30)."
+            )
 
 
 if __name__ == "__main__":

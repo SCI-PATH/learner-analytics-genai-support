@@ -14,9 +14,9 @@ Run:
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from copy import deepcopy
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
 import sqlite3
 from typing import Any, Literal, Optional
@@ -24,13 +24,22 @@ from typing import Any, Literal, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 from bkt_engine import ScienceBKT
+from postgres_store import (
+    fetch_assessment_attempts_for_learner,
+    fetch_frustration_scores_for_learner,
+    fetch_tutor_turns_for_learner,
+    insert_assessment_attempt,
+    insert_frustration_cue,
+    insert_tutor_turn,
+    list_distinct_learner_ids,
+    postgres_configured,
+)
 from socratic_tutor import (
     generate_socratic_hint,
     generate_socratic_hint_auto_topic,
@@ -54,19 +63,35 @@ app = FastAPI(
     version="0.1.0",
     openapi_tags=[
         {
+            "name": "Health",
+            "description": "Service health check.",
+        },
+        {
             "name": "Mastery",
             "description": (
-                "Read or update BKT mastery. Teammates who only need the current score "
-                "and learner category should call **GET /api/v1/mastery/{user_id}/{topic_id}**."
+                "BKT mastery read/update. Question Engine writes scored attempts via "
+                "**POST /api/v1/assessment-submit**. Read current P(L) with "
+                "**GET /api/v1/mastery/{user_id}/{topic_id}**."
             ),
         },
-        {"name": "Tutor", "description": "Socratic chatbot hint endpoints."},
-        {"name": "Engagement", "description": "Frustration cues from Component 3."},
+        {
+            "name": "Engagement",
+            "description": (
+                "Frustration cues from Component 3. Stored in Postgres "
+                "``learner_analytics.frustration_cues``; steers tutor tone on the next hint."
+            ),
+        },
+        {
+            "name": "Tutor",
+            "description": (
+                "Socratic chatbot hint endpoints. Each successful turn is persisted to "
+                "``learner_analytics.tutor_turns``. BKT may update per ``TUTOR_BKT_POLICY``."
+            ),
+        },
         {
             "name": "Analytics",
             "description": (
-                "Teacher dashboard (matrix, classroom at-risk) and student-facing "
-                "focus areas / profile endpoints."
+                "Teacher dashboard (matrix, at-risk) and student profile / focus areas."
             ),
         },
     ],
@@ -136,23 +161,8 @@ def _mastery_category_payload(mastery: float) -> dict[str, Any]:
             "advanced": f"P(L) >= {_MASTERY_ADVANCED_MIN:.2f}",
         },
     }
-_replay_engine_cache: Optional[ScienceBKT] = None
-_mastery_matrix_cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], dict[str, dict[str, float | None]]] = {}
-_MASTER_MATRIX_CACHE_MAX = 32
 _LIVE_STATE_DB = PROJECT_ROOT / "live_state_events.db"
 _INTERACTION_LOG_PATH = PROJECT_ROOT / "interaction_logs.json"
-_DISTRACTOR_TAGS_BY_TOPIC: dict[str, list[str]] = {}
-
-
-def _distractor_tags_for_topic(topic_id: str) -> list[str]:
-    tid = str(topic_id)
-    if tid in _DISTRACTOR_TAGS_BY_TOPIC:
-        return _DISTRACTOR_TAGS_BY_TOPIC[tid]
-    return [
-        f"Misconception related to {tid}",
-        "Partial understanding of key concept",
-        "Misapplied science rule",
-    ]
 
 
 def _canonicalize_question_type(value: Any) -> Optional[str]:
@@ -284,6 +294,10 @@ def _hydrate_live_state_from_db() -> None:
     engine = get_shared_bkt_engine()
     if not engine.skill_map:
         engine.initialize_skills()
+    try:
+        skip_bkt_replay = postgres_configured()
+    except Exception:
+        skip_bkt_replay = False
     for event_type, payload in events:
         if event_type == "assessment_submit":
             uid = str(payload.get("user_id") or "")
@@ -299,10 +313,13 @@ def _hydrate_live_state_from_db() -> None:
                 response_time_s = float(response_time) if response_time is not None else None
             except (TypeError, ValueError):
                 response_time_s = None
-            try:
-                engine.predict_update(uid, topic, label, response_time_s)
-            except ValueError:
-                continue
+            if not skip_bkt_replay:
+                try:
+                    engine.predict_update(
+                        uid, topic, label, response_time_s, persist=False
+                    )
+                except ValueError:
+                    continue
             _append_signal(uid, topic, float(label))
             _record_assessment_attempt(payload)
         elif event_type == "frustration_cue":
@@ -432,78 +449,17 @@ def _compose_topic_risk_alert(
 def _build_student_focus_areas(
     user_id: str,
     *,
-    mode: str = "live_state",
     topic_ids: Optional[list[str]] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Return all at-risk topics for one learner (student focus areas).
 
     Unlike the classroom at-risk endpoint (one current topic per student), this
-    scans every topic the learner has evidence on.
+    scans every topic the learner has evidence on from live runtime + Postgres state.
     """
     uid = str(user_id)
     focus_areas: list[dict[str, Any]] = []
 
-    if mode == "replay_logs":
-        engine = _get_replay_engine()
-        all_topics = sorted(engine.skill_map.keys())
-        topic_pool = [t for t in (topic_ids if topic_ids else all_topics) if t in engine.skill_map]
-        logs_df = engine.logs_df.copy()
-        logs_df["user_id"] = logs_df["user_id"].astype(str)
-        logs_df["skill_name"] = logs_df["skill_name"].astype(str)
-        u_df = logs_df[
-            (logs_df["user_id"] == uid) & (logs_df["skill_name"].isin(set(topic_pool)))
-        ].copy()
-        if u_df.empty:
-            return [], {"known_topics": all_topics, "topics_scanned": 0}
-
-        u_df = u_df.sort_values(["order_id"]).reset_index(drop=True)
-        work = deepcopy(engine)
-        mastery_hist: dict[str, list[float]] = defaultdict(list)
-        for row in u_df.itertuples(index=False):
-            topic = str(getattr(row, "skill_name"))
-            is_correct = int(getattr(row, "correct"))
-            response_time = None
-            if hasattr(row, "response_time"):
-                try:
-                    response_time = float(getattr(row, "response_time"))
-                except (TypeError, ValueError):
-                    response_time = None
-            out = work.predict_update(uid, topic, is_correct, response_time)
-            mastery_hist[topic].append(float(out.get("mastery_probability", 0.0)))
-
-        topics_with_evidence = sorted(set(u_df["skill_name"].astype(str)))
-        for topic in topics_with_evidence:
-            mastery = float(work.get_current_mastery_probability(uid, topic))
-            low_mastery = mastery < _MASTERY_LOW_THRESHOLD
-            tail = mastery_hist.get(topic, [])[-3:]
-            neg_velocity = len(tail) >= 3 and bool(tail[0] > tail[1] > tail[2])
-            sig_tail = [
-                float(getattr(r, "correct"))
-                for r in u_df.itertuples(index=False)
-                if str(getattr(r, "skill_name")) == topic
-            ][-5:]
-            recent_perf = (sum(sig_tail) / len(sig_tail)) if sig_tail else None
-            weak_recent_perf = (recent_perf is not None) and (recent_perf < 0.4)
-            alert = _compose_topic_risk_alert(
-                student_id=uid,
-                topic_id=topic,
-                mastery=mastery,
-                low_mastery=low_mastery,
-                neg_velocity=neg_velocity,
-                weak_recent_perf=weak_recent_perf,
-                recent_signal_tail=tail,
-                recent_performance_avg=recent_perf,
-            )
-            if alert:
-                focus_areas.append(alert)
-        focus_areas.sort(key=lambda a: a["risk_score"], reverse=True)
-        return focus_areas, {
-            "known_topics": all_topics,
-            "topics_scanned": len(topics_with_evidence),
-        }
-
-    # live_state
     engine = get_shared_bkt_engine()
     if not engine.skill_map:
         engine.initialize_skills()
@@ -553,25 +509,43 @@ def _build_student_focus_areas(
     }
 
 
-def _record_chat_turn(
+def _record_tutor_turn(
+    *,
     user_id: str,
     topic_id: str,
     student_message: str,
     tutor_message: str,
     interaction_score: Optional[float] = None,
-) -> None:
-    record = {
+    endpoint: str = "/tutor/hint",
+    persona_id: Optional[str] = None,
+    hint_mode: Optional[str] = None,
+    topic_inferred: bool = False,
+    bkt_updated: bool = False,
+    frustration_metadata: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Persist one tutor turn to memory, SQLite, and Postgres (when configured)."""
+    score_val = (
+        None
+        if interaction_score is None
+        else float(max(0.0, min(1.0, float(interaction_score))))
+    )
+    frustration_metadata = frustration_metadata or {}
+    record: dict[str, Any] = {
         "user_id": str(user_id),
         "topic_id": str(topic_id),
         "student_message": str(student_message),
         "tutor_hint": str(tutor_message),
-        "interaction_score": (
-            None if interaction_score is None else float(max(0.0, min(1.0, interaction_score)))
-        ),
-        "critical_confusion": bool(
-            interaction_score is not None and float(interaction_score) < 0.30
-        ),
+        "interaction_score": score_val,
+        "critical_confusion": bool(score_val is not None and score_val < 0.30),
         "timestamp": datetime.now(UTC).isoformat(),
+        "endpoint": endpoint,
+        "persona_id": persona_id,
+        "hint_mode": hint_mode,
+        "topic_inferred": bool(topic_inferred),
+        "bkt_updated": bool(bkt_updated),
+        "frustration_level_used": frustration_metadata.get("frustration_level_used"),
+        "frustration_source_tag": frustration_metadata.get("source_tag"),
+        "frustration_effective_score": frustration_metadata.get("effective_score"),
     }
     _chat_history_by_user[str(user_id)].append(
         {
@@ -585,6 +559,50 @@ def _record_chat_turn(
     )
     _latest_topic_by_user[str(user_id)] = str(topic_id)
     _persist_event("chat_turn", record)
+    postgres_result = insert_tutor_turn(record)
+    return {"record": record, "postgres": postgres_result}
+
+
+def _load_tutor_turns_for_user(user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Engagement timeline rows; prefers Postgres when configured."""
+    if postgres_configured():
+        db_rows = fetch_tutor_turns_for_learner(str(user_id), limit=limit)
+        if db_rows:
+            return db_rows
+    return _load_interaction_logs_for_user(user_id, limit=limit)
+
+
+def _load_chat_tail_for_user(user_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Last N chat turns for profile review; prefers Postgres when configured."""
+    if postgres_configured():
+        db_rows = fetch_tutor_turns_for_learner(str(user_id), limit=limit)
+        if db_rows:
+            return [
+                {
+                    "topic_id": row.get("topic_id"),
+                    "student_message": row.get("student_message"),
+                    "tutor_hint": row.get("tutor_hint"),
+                    "interaction_score": row.get("interaction_score"),
+                    "critical_confusion": row.get("critical_confusion"),
+                    "timestamp": row.get("timestamp"),
+                }
+                for row in db_rows[-limit:]
+            ]
+    return list(_chat_history_by_user.get(str(user_id), []))[-limit:]
+
+
+def _load_frustration_values_for_user(user_id: str) -> list[float]:
+    """Frustration cue scores for engagement metrics; prefers Postgres."""
+    if postgres_configured():
+        db_vals = fetch_frustration_scores_for_learner(str(user_id))
+        if db_vals:
+            return db_vals
+    return [
+        v
+        for (uid, _topic), seq in _frustration_history.items()
+        if uid == str(user_id)
+        for v in seq
+    ]
 
 
 def _normalize_assessment_attempt(payload: dict[str, Any]) -> dict[str, Any]:
@@ -658,78 +676,24 @@ def _live_distractor_counts(user_id: str) -> dict[str, int]:
 
 
 def _live_attempts_for_user(user_id: str) -> list[dict[str, Any]]:
+    """Assessment attempts from in-memory runtime; prefers Postgres when configured."""
+    if postgres_configured():
+        db_rows = fetch_assessment_attempts_for_learner(str(user_id))
+        if db_rows:
+            return db_rows
     return list(_assessment_attempts_by_user.get(str(user_id), []))
 
 
-def _replay_user_attempts(
-    user_id: str,
-) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, list[float]], list[float]]:
-    """
-    Replay one learner's historical logs for profile analytics.
-
-    Returns:
-    - attempts in chronological order with mastery trajectory.
-    - distractor frequency map (simulated deterministic tags for incorrect rows).
-    - topic -> mastery trajectory list.
-    - global mastery trajectory list.
-    """
-    engine = deepcopy(_get_replay_engine())
-    logs_df = engine.logs_df.copy()
-    u_df = logs_df[logs_df["user_id"].astype(str) == str(user_id)].copy()
-    if u_df.empty:
-        return [], {}, {}, []
-    if "order_id" in u_df.columns:
-        u_df = u_df.sort_values(["order_id"]).reset_index(drop=True)
-    else:
-        u_df = u_df.reset_index(drop=True)
-
-    distractor_counts: dict[str, int] = defaultdict(int)
-    attempts: list[dict[str, Any]] = []
-    mastery_by_topic: dict[str, list[float]] = defaultdict(list)
-    mastery_all: list[float] = []
-
-    for idx, row in enumerate(u_df.itertuples(index=False)):
-        topic = str(getattr(row, "skill_name"))
-        is_correct = int(getattr(row, "correct"))
-        response_time = None
-        if hasattr(row, "response_time"):
-            try:
-                response_time = float(getattr(row, "response_time"))
-            except (TypeError, ValueError):
-                response_time = None
-
-        out = engine.predict_update(str(user_id), topic, is_correct, response_time)
-        mastery = float(out.get("mastery_probability", 0.0))
-        mastery_by_topic[topic].append(mastery)
-        mastery_all.append(mastery)
-        attempts.append(
-            {
-                "topic_id": topic,
-                "is_correct": bool(is_correct),
-                "response_time_s": response_time,
-                "mastery_probability": mastery,
-            }
-        )
-        if not is_correct:
-            tags = _distractor_tags_for_topic(topic)
-            tag = tags[idx % len(tags)]
-            distractor_counts[tag] += 1
-    return attempts, dict(distractor_counts), dict(mastery_by_topic), mastery_all
-
-
-def _get_replay_engine() -> ScienceBKT:
-    """
-    Shared read-only baseline engine for replay computations.
-
-    Reusing one initialized engine avoids repeated CSV + skill initialization costs
-    on each `/api/v1/mastery/matrix` request in replay mode.
-    """
-    global _replay_engine_cache
-    if _replay_engine_cache is None:
-        _replay_engine_cache = ScienceBKT(data_path="synthetic_logs.csv")
-        _replay_engine_cache.initialize_skills()
-        _replay_engine_cache.preload_calibrated_skill_params()
-    return _replay_engine_cache
+def _known_learner_ids(student_ids: Optional[list[str]] = None) -> list[str]:
+    """Union of learners seen in runtime state, events, and Postgres."""
+    ids: set[str] = set(_latest_topic_by_user.keys())
+    ids.update(str(u) for u, _ in get_shared_bkt_engine().student_state.keys())
+    if postgres_configured():
+        ids.update(list_distinct_learner_ids())
+    if student_ids:
+        allowed = set(student_ids)
+        ids = {u for u in ids if u in allowed}
+    return sorted(ids)
 
 
 class ChatTurn(BaseModel):
@@ -872,40 +836,20 @@ class FrustrationCueSubmitRequest(BaseModel):
 
 
 class MasteryMatrixRequest(BaseModel):
-    """
-    Request payload for classroom mastery matrix extraction.
-
-    mode:
-    - replay_logs: recompute mastery from synthetic_logs.csv using ScienceBKT logic
-    - live_state: use only in-memory shared engine state (plus priors for unseen pairs)
-    """
+    """Request payload for classroom mastery matrix (live BKT + Postgres state)."""
 
     student_ids: list[str] = Field(..., min_length=1, description="List of learner IDs")
     topic_ids: list[str] = Field(..., min_length=1, description="List of topic/skill IDs")
-    mode: str = Field(
-        "replay_logs",
-        description="mastery source: replay_logs or live_state",
-        pattern="^(replay_logs|live_state)$",
-    )
 
 
 class AtRiskStudentsRequest(BaseModel):
-    """
-    Optional filter controls for at-risk analytics.
-
-    If not provided, the endpoint scans known users and all known topics.
-    """
+    """Optional filter controls for at-risk analytics."""
 
     student_ids: Optional[list[str]] = Field(None, description="Restrict scan to these students")
     topic_ids: Optional[list[str]] = Field(None, description="Restrict scan to these topics")
-    mode: str = Field(
-        "live_state",
-        description="analytics source mode: live_state or replay_logs",
-        pattern="^(replay_logs|live_state)$",
-    )
 
 
-@app.get("/health")
+@app.get("/health", tags=["Health"], summary="Health check")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
@@ -914,6 +858,31 @@ def health() -> dict[str, str]:
 def _startup_init() -> None:
     _init_persistence()
     _hydrate_live_state_from_db()
+    _warmup_heavy_dependencies()
+
+
+def _warmup_heavy_dependencies() -> None:
+    """Load RAG embeddings + BKT skill map once at startup (avoids first-request stall)."""
+    try:
+        engine = get_shared_bkt_engine()
+        if not engine.skill_map:
+            engine.initialize_skills()
+        if engine.params_source == "postgres":
+            engine.preload_calibrated_skill_params()
+    except Exception:
+        pass
+    if os.environ.get("TUTOR_WARMUP_RAG", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        try:
+            from knowledge_base import retrieve_context
+
+            retrieve_context("G6_C7_MAG_POLES", k=1)
+        except Exception:
+            pass
 
 
 def _frustration_metadata_from_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -931,7 +900,12 @@ def _frustration_metadata_from_result(result: dict[str, Any]) -> dict[str, Any]:
     return {k: result.get(k) for k in keys if result.get(k) is not None}
 
 
-@app.post("/tutor/hint")
+@app.post(
+    "/tutor/hint",
+    tags=["Tutor"],
+    summary="Socratic hint (explicit topic)",
+    response_description="Hint text, interaction score, optional BKT update, Postgres tutor_turn row",
+)
 def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
     """
     Explicit topic flow:
@@ -957,27 +931,39 @@ def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
     if result.get("success"):
         score = result.get("interaction_score_effective")
         score_val = float(score) if isinstance(score, (int, float)) else None
-        _record_chat_turn(
-            req.user_id,
-            str(result.get("topic_id") or req.topic_id),
-            req.student_answer,
-            str(result.get("hint_text") or ""),
+        frustration_meta = _frustration_metadata_from_result(result)
+        topic_used = str(result.get("topic_id") or req.topic_id)
+        _record_tutor_turn(
+            user_id=req.user_id,
+            topic_id=topic_used,
+            student_message=req.student_answer,
+            tutor_message=str(result.get("hint_text") or ""),
             interaction_score=score_val,
+            endpoint="/tutor/hint",
+            persona_id=str(result.get("persona_id") or "") or None,
+            hint_mode=str(result.get("hint_mode") or "") or None,
+            topic_inferred=False,
+            bkt_updated=bool(result.get("bkt_updated")),
+            frustration_metadata=frustration_meta,
         )
         _append_interaction_log(
             user_id=req.user_id,
-            topic_id=str(result.get("topic_id") or req.topic_id),
+            topic_id=topic_used,
             interaction_score=score_val,
             endpoint="/tutor/hint",
-            frustration_metadata=_frustration_metadata_from_result(result),
+            frustration_metadata=frustration_meta,
         )
-        if isinstance(score, (int, float)):
-            topic_used = str(result.get("topic_id") or req.topic_id)
+        if isinstance(score, (int, float)) and topic_used:
             _append_signal(req.user_id, topic_used, float(score))
     return result
 
 
-@app.post("/tutor/hint-auto-topic")
+@app.post(
+    "/tutor/hint-auto-topic",
+    tags=["Tutor"],
+    summary="Socratic hint (auto topic routing)",
+    response_description="Same as /tutor/hint; topic may be inferred from student text",
+)
 def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
     """
     Question-only flow:
@@ -1002,28 +988,39 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
         score = result.get("interaction_score_effective")
         score_val = float(score) if isinstance(score, (int, float)) else None
         resolved_topic = str(result.get("topic_id_resolved") or result.get("topic_id") or req.topic_id or "")
-        _record_chat_turn(
-            req.user_id,
-            resolved_topic,
-            req.student_answer,
-            str(result.get("hint_text") or ""),
+        frustration_meta = _frustration_metadata_from_result(result)
+        topic_inferred = not bool(req.topic_id and str(req.topic_id).strip())
+        _record_tutor_turn(
+            user_id=req.user_id,
+            topic_id=resolved_topic,
+            student_message=req.student_answer,
+            tutor_message=str(result.get("hint_text") or ""),
             interaction_score=score_val,
+            endpoint="/tutor/hint-auto-topic",
+            persona_id=str(result.get("persona_id") or "") or None,
+            hint_mode=str(result.get("hint_mode") or "") or None,
+            topic_inferred=topic_inferred,
+            bkt_updated=bool(result.get("bkt_updated")),
+            frustration_metadata=frustration_meta,
         )
         _append_interaction_log(
             user_id=req.user_id,
             topic_id=resolved_topic,
             interaction_score=score_val,
             endpoint="/tutor/hint-auto-topic",
-            frustration_metadata=_frustration_metadata_from_result(result),
+            frustration_metadata=frustration_meta,
         )
-        if isinstance(score, (int, float)):
-            topic_used = resolved_topic
-            if topic_used:
-                _append_signal(req.user_id, topic_used, float(score))
+        if isinstance(score, (int, float)) and resolved_topic:
+            _append_signal(req.user_id, resolved_topic, float(score))
     return result
 
 
-@app.post("/api/v1/assessment-submit", tags=["Mastery"])
+@app.post(
+    "/api/v1/assessment-submit",
+    tags=["Mastery"],
+    summary="Record scored quiz attempt (Question Engine)",
+    response_description="Updated P(L), Postgres assessment_attempts + bkt_mastery rows",
+)
 def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     """
     Record a **ground-truth** correct/incorrect outcome from the question engine.
@@ -1034,6 +1031,9 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     BKT uses only ``is_correct`` (and optional ``response_time_s``). ``question_type``
     (MCQ / ShortAnswer / MultiBlank / TrueFalse) is stored for analytics and does
     **not** change whether mastery is updated.
+
+    After the BKT update, the attempt is inserted into Postgres
+    ``learner_analytics.assessment_attempts`` when ``DATABASE_URL`` is set in ``.env``.
     """
     engine = get_shared_bkt_engine()
     label = 1 if req.is_correct else 0
@@ -1082,6 +1082,7 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
         }
     )
     _persist_event("assessment_submit", attempt_record)
+    postgres_result = insert_assessment_attempt(attempt_record)
     return {
         "success": True,
         "user_id": req.user_id,
@@ -1093,6 +1094,9 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
         "risk_flag": bool(bkt_out.get("at_risk")),
         "bkt_observation_label": label,
         "label_source": "assessment",
+        "postgres": postgres_result,
+        "postgres_mastery": bkt_out.get("postgres_mastery"),
+        "bkt_params_source": bkt_out.get("params_source"),
         "assessment_fields_persisted": {
             key: attempt_record.get(key)
             for key in (
@@ -1115,7 +1119,12 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/api/v1/engagement/frustration-cue")
+@app.post(
+    "/api/v1/engagement/frustration-cue",
+    tags=["Engagement"],
+    summary="Record frustration cue (Component 3)",
+    response_description="Persisted to learner_analytics.frustration_cues; affects next tutor tone",
+)
 def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, Any]:
     """
     Record an engagement/frustration signal for sentiment-aware tutoring.
@@ -1130,16 +1139,15 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
         source=req.source,
     )
     _frustration_history[(str(req.user_id), str(req.topic_id))].append(float(signal.frustration_score))
-    _persist_event(
-        "frustration_cue",
-        {
-            "user_id": str(req.user_id),
-            "topic_id": str(req.topic_id),
-            "frustration_score": float(signal.frustration_score),
-            "source": str(signal.source),
-            "recorded_at": signal.recorded_at.isoformat(),
-        },
-    )
+    cue_record = {
+        "user_id": str(req.user_id),
+        "topic_id": str(req.topic_id),
+        "frustration_score": float(signal.frustration_score),
+        "source": str(signal.source),
+        "recorded_at": signal.recorded_at.isoformat(),
+    }
+    _persist_event("frustration_cue", cue_record)
+    postgres_cue = insert_frustration_cue(cue_record)
     return {
         "success": True,
         "user_id": req.user_id,
@@ -1151,6 +1159,7 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
         "decay_tau_seconds": 600,
         "effective_floor": 0.2,
         "used_by": ["/tutor/hint", "/tutor/hint-auto-topic"],
+        "postgres": postgres_cue,
     }
 
 
@@ -1221,67 +1230,17 @@ def get_current_mastery(
     }
 
 
-def _compute_mastery_by_replaying_logs(student_ids: list[str], topic_ids: list[str]) -> dict[str, dict[str, float]]:
-    """
-    Build a mastery matrix using the current BKT implementation on historical logs.
-
-    This avoids fake data: it replays actual rows from synthetic_logs.csv through
-    predict_update and then reads resulting P(L) values.
-    """
-    base_engine = _get_replay_engine()
-    cache_key = ("replay_logs", tuple(student_ids), tuple(topic_ids))
-    if cache_key in _mastery_matrix_cache:
-        return deepcopy(_mastery_matrix_cache[cache_key])
-
-    # Use a working copy so cached baseline state is not mutated by predict_update.
-    engine = deepcopy(base_engine)
-    selected_students = set(student_ids)
-    selected_topics = set(topic_ids)
-    known_topics = set(engine.skill_map.keys())
-
-    logs_df = engine.logs_df.copy()
-    filtered = logs_df[
-        logs_df["user_id"].astype(str).isin(selected_students)
-        & logs_df["skill_name"].astype(str).isin(selected_topics)
-    ].copy()
-    filtered = filtered.sort_values(["order_id"]).reset_index(drop=True)
-
-    for row in filtered.itertuples(index=False):
-        user_id = str(getattr(row, "user_id"))
-        skill = str(getattr(row, "skill_name"))
-        is_correct = int(getattr(row, "correct"))
-        response_time = None
-        if hasattr(row, "response_time"):
-            try:
-                response_time = float(getattr(row, "response_time"))
-            except (TypeError, ValueError):
-                response_time = None
-        engine.predict_update(user_id, skill, is_correct, response_time)
-
-    matrix: dict[str, dict[str, float]] = {}
-    for sid in student_ids:
-        matrix[sid] = {}
-        for tid in topic_ids:
-            if tid not in known_topics:
-                # Unknown topic IDs are surfaced as null in API output instead of 500.
-                matrix[sid][tid] = None
-                continue
-            matrix[sid][tid] = float(engine.get_current_mastery_probability(sid, tid))
-    # Small bounded memoization for repeated dashboard calls.
-    if len(_mastery_matrix_cache) >= _MASTER_MATRIX_CACHE_MAX:
-        first_key = next(iter(_mastery_matrix_cache))
-        _mastery_matrix_cache.pop(first_key, None)
-    _mastery_matrix_cache[cache_key] = deepcopy(matrix)
-    return matrix
-
-
 def _compute_mastery_from_live_state(student_ids: list[str], topic_ids: list[str]) -> dict[str, dict[str, float]]:
     """
-    Build mastery matrix from shared in-memory engine.
+    Build mastery matrix from shared in-memory engine + Postgres-backed BKT state.
 
     Unseen learner-topic pairs resolve to topic priors via get_current_mastery_probability.
     """
     engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    for sid in student_ids:
+        engine.prefetch_learner_states(str(sid))
     known_topics = set(engine.skill_map.keys()) if engine.skill_map else set()
     matrix: dict[str, dict[str, float]] = {}
     for sid in student_ids:
@@ -1327,172 +1286,53 @@ def _select_current_topic_for_user(
     return topics[0] if topics else None
 
 
-def _build_replay_at_risk_alerts(
-    student_ids: Optional[list[str]],
-    topic_ids: Optional[list[str]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """
-    Replay synthetic logs and derive at-risk alerts from historical trajectories.
-
-    In replay mode, velocity is checked on the last 3 mastery values for a user's
-    selected current topic (strictly decreasing), which is meaningful for binary logs.
-    """
-    engine = _get_replay_engine()
-    all_topics = sorted(engine.skill_map.keys())
-    topic_pool = [t for t in (topic_ids if topic_ids else all_topics) if t in engine.skill_map]
-    if not topic_pool:
-        return [], {"known_topics": all_topics}
-
-    logs_df = engine.logs_df.copy()
-    logs_df["user_id"] = logs_df["user_id"].astype(str)
-    logs_df["skill_name"] = logs_df["skill_name"].astype(str)
-
-    users_all = sorted(set(logs_df["user_id"]))
-    if student_ids:
-        user_pool = [u for u in users_all if u in set(student_ids)]
-    else:
-        user_pool = users_all
-    if not user_pool:
-        return [], {"known_topics": all_topics}
-
-    filt = logs_df[
-        logs_df["user_id"].isin(user_pool)
-        & logs_df["skill_name"].isin(set(topic_pool))
-    ].copy()
-    filt = filt.sort_values(["order_id"]).reset_index(drop=True)
-
-    # Replay with trajectory capture for negative velocity on mastery values.
-    work = deepcopy(engine)
-    mastery_hist: dict[tuple[str, str], list[float]] = defaultdict(list)
-    for row in filt.itertuples(index=False):
-        uid = str(getattr(row, "user_id"))
-        topic = str(getattr(row, "skill_name"))
-        is_correct = int(getattr(row, "correct"))
-        response_time = None
-        if hasattr(row, "response_time"):
-            try:
-                response_time = float(getattr(row, "response_time"))
-            except (TypeError, ValueError):
-                response_time = None
-        out = work.predict_update(uid, topic, is_correct, response_time)
-        mastery_hist[(uid, topic)].append(float(out.get("mastery_probability", 0.0)))
-
-    alerts: list[dict[str, Any]] = []
-    for uid in user_pool:
-        u_rows = filt[filt["user_id"] == uid]
-        current_topic = str(u_rows.iloc[-1]["skill_name"]) if not u_rows.empty else topic_pool[0]
-        mastery = float(work.get_current_mastery_probability(uid, current_topic))
-        low_mastery = mastery < _MASTERY_LOW_THRESHOLD
-        tail = mastery_hist.get((uid, current_topic), [])[-3:]
-        neg_velocity = len(tail) >= 3 and bool(tail[0] > tail[1] > tail[2])
-        sig_tail = [
-            float(getattr(r, "correct"))
-            for r in u_rows.itertuples(index=False)
-            if str(getattr(r, "skill_name")) == current_topic
-        ][-5:]
-        recent_perf = (sum(sig_tail) / len(sig_tail)) if sig_tail else None
-        weak_recent_perf = (recent_perf is not None) and (recent_perf < 0.4)
-
-        # Simple + explainable predictive rule:
-        # at-risk if at least 2 of the 3 signals are true.
-        signal_count = int(low_mastery) + int(neg_velocity) + int(weak_recent_perf)
-        if signal_count < 2:
-            continue
-
-        reasons: list[str] = []
-        risk_score = 0
-        if low_mastery:
-            reasons.append("Low Mastery")
-            risk_score += 40
-        if neg_velocity:
-            reasons.append("Declining Mastery Velocity")
-            risk_score += 30
-        if weak_recent_perf:
-            reasons.append("Weak Recent Performance")
-            risk_score += 30
-        if mastery < _MASTERY_CRITICAL_THRESHOLD and weak_recent_perf:
-            # Hard override for severe low-mastery + weak-recent cases.
-            reasons.append("Critical Low Mastery")
-            risk_score = max(risk_score, 85)
-
-        alerts.append(
-            {
-                "student_id": uid,
-                "topic_id": current_topic,
-                "mastery_probability": round(mastery, 4),
-                "mastery_category": _mastery_category_from_pl(mastery),
-                "negative_velocity": bool(neg_velocity),
-                "recent_signal_tail": [round(v, 4) for v in tail],
-                "recent_performance_avg": (None if recent_perf is None else round(float(recent_perf), 4)),
-                "signals_triggered": signal_count,
-                "risk_score": int(min(100, max(0, risk_score))),
-                "reason": "; ".join(reasons),
-            }
-        )
-    alerts.sort(key=lambda a: a["risk_score"], reverse=True)
-    return alerts, {"known_topics": all_topics}
-
-
 @app.post("/api/v1/analytics/at-risk-students", tags=["Analytics"])
 def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> dict[str, Any]:
     """
-    Return students predicted as at-risk for intervention.
+    Return students predicted as at-risk for intervention from live BKT + runtime signals.
 
     Criteria (current topic):
-    - Low Mastery: P(L) < 0.4
+    - Low Mastery: P(L) < 0.45
     - Negative Velocity: last 3 tutor/assessment signals strictly decrease
-    - High Slip Flag: fitted skill slip probability above threshold
+    - Weak Recent Performance: recent signal average < 0.4
     """
-    mode = req.mode if req else "live_state"
-    if mode == "replay_logs":
-        alerts, _meta = _build_replay_at_risk_alerts(
-            student_ids=(req.student_ids if req else None),
-            topic_ids=(req.topic_ids if req else None),
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    all_topics = sorted(engine.skill_map.keys())
+    topic_pool = [t for t in (req.topic_ids if req and req.topic_ids else all_topics) if t in engine.skill_map]
+    known_users = _known_learner_ids(req.student_ids if req else None)
+
+    alerts = []
+    for uid in known_users:
+        engine.prefetch_learner_states(uid)
+        current_topic = _select_current_topic_for_user(uid, topic_pool, engine)
+        if not current_topic:
+            continue
+
+        mastery = float(engine.get_current_mastery_probability(uid, current_topic))
+        low_mastery = mastery < _MASTERY_LOW_THRESHOLD
+        neg_velocity = _has_negative_velocity(uid, current_topic)
+        recent_avg = _recent_signal_avg(uid, current_topic, window=5)
+        weak_recent_perf = (recent_avg is not None) and (recent_avg < 0.4)
+
+        alert = _compose_topic_risk_alert(
+            student_id=uid,
+            topic_id=current_topic,
+            mastery=mastery,
+            low_mastery=low_mastery,
+            neg_velocity=neg_velocity,
+            weak_recent_perf=weak_recent_perf,
+            recent_signal_tail=list(_signal_history.get((uid, current_topic), []))[-3:],
+            recent_performance_avg=recent_avg,
         )
-    else:
-        engine = get_shared_bkt_engine()
-        if not engine.skill_map:
-            engine.initialize_skills()
-        all_topics = sorted(engine.skill_map.keys())
-        topic_pool = [t for t in (req.topic_ids if req and req.topic_ids else all_topics) if t in engine.skill_map]
+        if alert:
+            alerts.append(alert)
 
-        # Known students from logs + runtime state + streamed event memory.
-        logs_users = set(engine.logs_df["user_id"].astype(str).unique())
-        state_users = {str(u) for (u, _t) in engine.student_state.keys()}
-        event_users = set(_latest_topic_by_user.keys())
-        known_users = sorted(logs_users | state_users | event_users)
-        if req and req.student_ids:
-            known_users = [u for u in known_users if u in set(req.student_ids)]
-
-        alerts = []
-        for uid in known_users:
-            current_topic = _select_current_topic_for_user(uid, topic_pool, engine)
-            if not current_topic:
-                continue
-
-            mastery = float(engine.get_current_mastery_probability(uid, current_topic))
-            low_mastery = mastery < _MASTERY_LOW_THRESHOLD
-            neg_velocity = _has_negative_velocity(uid, current_topic)
-            recent_avg = _recent_signal_avg(uid, current_topic, window=5)
-            weak_recent_perf = (recent_avg is not None) and (recent_avg < 0.4)
-
-            alert = _compose_topic_risk_alert(
-                student_id=uid,
-                topic_id=current_topic,
-                mastery=mastery,
-                low_mastery=low_mastery,
-                neg_velocity=neg_velocity,
-                weak_recent_perf=weak_recent_perf,
-                recent_signal_tail=list(_signal_history.get((uid, current_topic), []))[-3:],
-                recent_performance_avg=recent_avg,
-            )
-            if alert:
-                alerts.append(alert)
-
-        alerts.sort(key=lambda a: a["risk_score"], reverse=True)
+    alerts.sort(key=lambda a: a["risk_score"], reverse=True)
     return {
         "success": True,
-        "mode": mode,
+        "mode": "live_state",
         "criteria": _risk_criteria_payload(),
         "count": len(alerts),
         "students": alerts,
@@ -1511,28 +1351,18 @@ def analytics_student_focus_areas(
         description="Learner ID — same `user_id` used on tutor / assessment-submit.",
         example="user_001",
     ),
-    mode: str = "live_state",
 ) -> dict[str, Any]:
     """
     **Student-facing** list of at-risk / focus topics for one learner.
 
-    Use this on the student profile page so learners can see where they need more practice.
-    Teachers should continue using ``POST /api/v1/analytics/at-risk-students`` for the
-    classroom overview.
-
-    Unlike the classroom endpoint (one *current* topic per student), this scans **all**
-    topics the learner has evidence on (attempts, tutor signals, or synthetic-log rows).
-
+    Scans every topic the learner has live evidence on (attempts, tutor signals, BKT state).
     Same risk rule as teacher alerts: at least 2 of
     low mastery / declining velocity / weak recent performance.
     """
-    if mode not in {"replay_logs", "live_state"}:
-        return {"success": False, "error": "mode must be replay_logs or live_state"}
-
-    focus_areas, meta = _build_student_focus_areas(str(user_id), mode=mode)
+    focus_areas, meta = _build_student_focus_areas(str(user_id))
     return {
         "success": True,
-        "mode": mode,
+        "mode": "live_state",
         "user_id": str(user_id),
         "criteria": _risk_criteria_payload(),
         "count": len(focus_areas),
@@ -1551,23 +1381,17 @@ def analytics_student_focus_areas(
 @app.post("/api/v1/mastery/matrix", tags=["Analytics"])
 def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     """
-    Return mastery probabilities for a classroom slice (students x topics).
+    Return mastery probabilities for a classroom slice (students × topics).
 
-    Use ``mode=replay_logs`` for meaningful baseline values from synthetic logs.
-    Use ``mode=live_state`` to inspect the process in-memory state produced by
-    assessment/tutor events since startup.
+    Uses live BKT state (in-memory + Postgres ``bkt_mastery``). Unseen pairs show skill priors.
     """
-    if req.mode == "replay_logs":
-        matrix = _compute_mastery_by_replaying_logs(req.student_ids, req.topic_ids)
-        known_topics = set(_get_replay_engine().skill_map.keys())
-    else:
-        matrix = _compute_mastery_from_live_state(req.student_ids, req.topic_ids)
-        shared = get_shared_bkt_engine()
-        known_topics = set(shared.skill_map.keys()) if shared.skill_map else set()
+    matrix = _compute_mastery_from_live_state(req.student_ids, req.topic_ids)
+    shared = get_shared_bkt_engine()
+    known_topics = set(shared.skill_map.keys()) if shared.skill_map else set()
     unknown_topic_ids = [t for t in req.topic_ids if t not in known_topics]
     return {
         "success": True,
-        "mode": req.mode,
+        "mode": "live_state",
         "student_ids": req.student_ids,
         "topic_ids": req.topic_ids,
         "unknown_topic_ids": unknown_topic_ids,
@@ -1580,52 +1404,45 @@ def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     tags=["Analytics"],
     summary="Deep-dive learner profile (teacher or student)",
 )
-def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[str, Any]:
+def analytics_student_profile(user_id: str) -> dict[str, Any]:
     """
-    Deep-dive profile for one learner.
-
-    mode:
-    - replay_logs: derive profile from synthetic_logs.csv replay + in-memory cues/chat
-    - live_state: derive BKT values from current shared engine state; assessment analytics prefer
-      live Question Engine attempts when present, else synthetic-log fallback.
+    Deep-dive profile for one learner from live BKT state, Postgres, and runtime events.
 
     Also embeds ``focus_areas`` (same payload as
     ``GET /api/v1/analytics/student-focus-areas/{user_id}``) for one-call profile pages.
     """
-    if mode not in {"replay_logs", "live_state"}:
-        return {"success": False, "error": "mode must be replay_logs or live_state"}
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    engine.prefetch_learner_states(str(user_id))
 
-    replay_engine = _get_replay_engine()
-    known_topics = sorted(replay_engine.skill_map.keys())
-    attempts, simulated_distractor_counts, mastery_by_topic, mastery_all = _replay_user_attempts(
-        user_id
-    )
     live_attempts = _live_attempts_for_user(user_id)
     live_distractor_counts = _live_distractor_counts(user_id)
-    use_live_distractors = bool(live_distractor_counts)
-    distractor_counts = live_distractor_counts if use_live_distractors else simulated_distractor_counts
-    distractor_source = (
-        "question_engine_live" if use_live_distractors else "simulated_from_incorrect_attempts_in_synthetic_logs"
-    )
-    profile_attempts = live_attempts if live_attempts else attempts
+    distractor_counts = live_distractor_counts
+    distractor_source = "question_engine_live" if live_distractor_counts else "none"
 
-    if mode == "live_state":
-        engine = get_shared_bkt_engine()
-        if not engine.skill_map:
-            engine.initialize_skills()
-    else:
-        engine = deepcopy(replay_engine)
-        # Re-apply user attempts so profile topic values match replayed trajectory.
-        for attempt in attempts:
-            engine.predict_update(
-                str(user_id),
-                str(attempt["topic_id"]),
-                1 if attempt["is_correct"] else 0,
-                attempt.get("response_time_s"),
-            )
+    topic_ids_for_bkt = sorted(
+        {
+            str(row.get("topic_id") or "")
+            for row in live_attempts
+            if row.get("topic_id")
+        }
+        | {
+            tid
+            for (u, tid), state in engine.student_state.items()
+            if u == str(user_id)
+            and isinstance(state, dict)
+            and int(state.get("attempts", 0)) > 0
+        }
+        | {
+            tid
+            for (u, tid), vals in _signal_history.items()
+            if u == str(user_id) and vals
+        }
+    )
 
     bkt_parameters: list[dict[str, Any]] = []
-    for topic_id in known_topics:
+    for topic_id in topic_ids_for_bkt:
         params = engine.get_skill_parameters(topic_id)
         p_l = float(engine.get_current_mastery_probability(str(user_id), topic_id))
         bkt_parameters.append(
@@ -1638,18 +1455,19 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
             }
         )
 
-    # Topic-level time-on-task trend from synthetic logs (simple slope over last 10 points).
     topic_time_trends: list[dict[str, Any]] = []
-    u_df = replay_engine.logs_df[replay_engine.logs_df["user_id"].astype(str) == str(user_id)].copy()
-    for topic_id in known_topics:
-        t_df = u_df[u_df["skill_name"].astype(str) == topic_id]
-        vals = pd.to_numeric(t_df.get("response_time"), errors="coerce").dropna().tolist() if "response_time" in t_df else []
+    by_topic: dict[str, list[float]] = defaultdict(list)
+    for row in live_attempts:
+        topic = str(row.get("topic_id") or "")
+        rt = row.get("response_time_s")
+        if topic and isinstance(rt, (int, float)):
+            by_topic[topic].append(float(rt))
+    for topic_id, vals in by_topic.items():
         tail = vals[-10:]
         if len(tail) >= 2:
             slope = (tail[-1] - tail[0]) / float(len(tail) - 1)
             trend = "increasing" if slope > 0.15 else ("decreasing" if slope < -0.15 else "stable")
         else:
-            slope = 0.0
             trend = "stable"
         topic_time_trends.append(
             {
@@ -1660,12 +1478,7 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
             }
         )
 
-    f_values = [
-        v
-        for (uid, _topic), seq in _frustration_history.items()
-        if uid == str(user_id)
-        for v in seq
-    ]
+    f_values = _load_frustration_values_for_user(str(user_id))
     avg_frustration = round(float(sum(f_values) / len(f_values)), 4) if f_values else None
 
     top_distractors = sorted(
@@ -1674,26 +1487,38 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
         reverse=True,
     )[:10]
 
-    chat_tail = list(_chat_history_by_user.get(str(user_id), []))[-5:]
-    if live_attempts:
-        timeline_tail = [
-            {
-                "topic_id": str(row.get("topic_id") or ""),
-                "is_correct": bool(row.get("is_correct")),
-                "response_time_s": row.get("response_time_s"),
-                "mastery_probability": row.get("updated_mastery_probability"),
-                "distractor_label": row.get("distractor_label"),
-                "question_type": row.get("question_type"),
-                "error_category": row.get("error_category"),
-                "detailed_explanation": row.get("detailed_explanation"),
-                "missed_blanks": row.get("missed_blanks"),
-                "similarity_score": row.get("similarity_score"),
-            }
-            for row in live_attempts[-10:]
-        ]
-    else:
-        timeline_tail = attempts[-10:]
-    engagement_tail = _load_interaction_logs_for_user(user_id, limit=10)
+    engagement_tail = _load_tutor_turns_for_user(user_id, limit=10)
+    chat_tail = [
+        {
+            "topic_id": row.get("topic_id"),
+            "student_message": row.get("student_message"),
+            "tutor_hint": row.get("tutor_hint"),
+            "interaction_score": row.get("interaction_score"),
+            "critical_confusion": row.get("critical_confusion"),
+            "timestamp": row.get("timestamp"),
+        }
+        for row in engagement_tail[-5:]
+    ]
+    timeline_tail = [
+        {
+            "topic_id": str(row.get("topic_id") or ""),
+            "is_correct": bool(row.get("is_correct")),
+            "response_time_s": row.get("response_time_s"),
+            "mastery_probability": row.get("updated_mastery_probability"),
+            "distractor_label": row.get("distractor_label"),
+            "question_type": row.get("question_type"),
+            "error_category": row.get("error_category"),
+            "detailed_explanation": row.get("detailed_explanation"),
+            "missed_blanks": row.get("missed_blanks"),
+            "similarity_score": row.get("similarity_score"),
+        }
+        for row in live_attempts[-10:]
+    ]
+    mastery_all = [
+        float(row["updated_mastery_probability"])
+        for row in live_attempts
+        if isinstance(row.get("updated_mastery_probability"), (int, float))
+    ]
     engagement_scores = [
         float(x.get("interaction_score"))
         for x in engagement_tail
@@ -1702,18 +1527,19 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
     critical_confusion_turns = [
         row for row in chat_tail if bool(row.get("critical_confusion")) is True
     ]
-    focus_areas, focus_meta = _build_student_focus_areas(str(user_id), mode=mode)
+    focus_areas, focus_meta = _build_student_focus_areas(str(user_id))
+    topics_covered = len({str(r.get("topic_id")) for r in live_attempts if r.get("topic_id")})
     return {
         "success": True,
-        "mode": mode,
+        "mode": "live_state",
         "user_id": str(user_id),
-        "topics_covered_count": len([t for t in mastery_by_topic.keys() if mastery_by_topic[t]]),
+        "topics_covered_count": topics_covered,
         "bkt_parameters": bkt_parameters,
         "focus_areas": focus_areas,
         "focus_areas_count": len(focus_areas),
         "assessment_insights": {
             "most_frequent_distractor_tags": top_distractors,
-            "attempts_count": len(profile_attempts),
+            "attempts_count": len(live_attempts),
             "live_attempts_count": len(live_attempts),
         },
         "engagement_metrics": {
@@ -1735,6 +1561,8 @@ def analytics_student_profile(user_id: str, mode: str = "replay_logs") -> dict[s
             "mastery_timeline_points": len(timeline_tail),
             "engagement_points": len(engagement_tail),
             "chat_points": len(chat_tail),
+            "engagement_source": "postgres" if postgres_configured() else "interaction_logs_json",
+            "chat_source": "postgres" if postgres_configured() else "memory",
             "overall_mastery_tail": [round(v, 4) for v in mastery_all[-10:]],
             "focus_areas_topics_scanned": focus_meta.get("topics_scanned", 0),
             "focus_areas_endpoint": f"/api/v1/analytics/student-focus-areas/{user_id}",

@@ -24,8 +24,8 @@ import requests
 import streamlit as st
 
 
-DEFAULT_API_BASE = "http://127.0.0.1:8000"
-DEFAULT_API_TIMEOUT_S = 180.0
+DEFAULT_API_BASE = "http://127.0.0.1:8003"
+DEFAULT_API_TIMEOUT_S = 60.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SKILL_HIERARCHY_CANDIDATES = [
     PROJECT_ROOT / "Data" / "Skill-Heirarchies-G6-G9-Full-Chapters.xlsx",
@@ -104,14 +104,12 @@ def fetch_mastery_matrix(
     api_base: str,
     student_ids: list[str],
     topic_ids: list[str],
-    mode: str,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/mastery/matrix"
     payload = {
         "student_ids": student_ids,
         "topic_ids": topic_ids,
-        "mode": mode,
     }
     resp = requests.post(url, json=payload, timeout=timeout_s)
     resp.raise_for_status()
@@ -122,14 +120,12 @@ def fetch_at_risk_students(
     api_base: str,
     student_ids: list[str],
     topic_ids: list[str],
-    mode: str,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/analytics/at-risk-students"
     payload = {
         "student_ids": student_ids,
         "topic_ids": topic_ids,
-        "mode": mode,
     }
     resp = requests.post(url, json=payload, timeout=timeout_s)
     resp.raise_for_status()
@@ -139,11 +135,10 @@ def fetch_at_risk_students(
 def fetch_student_profile(
     api_base: str,
     user_id: str,
-    mode: str,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/analytics/student-profile/{user_id}"
-    resp = requests.get(url, params={"mode": mode}, timeout=timeout_s)
+    resp = requests.get(url, timeout=timeout_s)
     resp.raise_for_status()
     return resp.json()
 
@@ -488,7 +483,7 @@ div[data-testid="stDataFrame"] table {
     )
 
     with st.sidebar:
-        st.header("⚙️ Data Source")
+        st.header("⚙️ API")
         api_base = st.text_input("FastAPI Base URL", value=DEFAULT_API_BASE)
         api_timeout_s = st.number_input(
             "API timeout (seconds)",
@@ -496,18 +491,8 @@ div[data-testid="stDataFrame"] table {
             max_value=300.0,
             value=DEFAULT_API_TIMEOUT_S,
             step=5.0,
-            help="Increase this if replay_logs requests are slow.",
         )
-        mode = st.selectbox(
-            "Mastery source mode",
-            options=["replay_logs", "live_state"],
-            index=0,
-            help=(
-                "replay_logs = recompute mastery by replaying synthetic logs "
-                "(recommended baseline). "
-                "live_state = current in-memory engine state since server start."
-            ),
-        )
+        st.caption("Analytics use **live BKT state** (Postgres + in-memory events since server start).")
 
         st.header("🧪 Classroom Slice")
         students_text = st.text_area(
@@ -550,22 +535,17 @@ div[data-testid="stDataFrame"] table {
     should_reload = bool(run) or st.session_state.dashboard_data is None
     if should_reload:
         try:
-            with st.spinner(
-                "Loading mastery and at-risk analytics… "
-                "(first load with 57 topics in replay_logs mode can take 1–2 minutes)"
-            ):
+            with st.spinner("Loading live mastery and at-risk analytics…"):
                 payload = fetch_mastery_matrix(
                     api_base,
                     student_ids,
                     topic_ids,
-                    mode=mode,
                     timeout_s=float(api_timeout_s),
                 )
                 risk_payload = fetch_at_risk_students(
                     api_base,
                     student_ids,
                     topic_ids,
-                    mode=mode,
                     timeout_s=float(api_timeout_s),
                 )
         except requests.RequestException as exc:
@@ -580,7 +560,6 @@ div[data-testid="stDataFrame"] table {
             "risk_payload": risk_payload,
             "student_ids": student_ids,
             "topic_ids": topic_ids,
-            "mode": mode,
             "api_base": api_base,
             "api_timeout_s": float(api_timeout_s),
         }
@@ -590,7 +569,6 @@ div[data-testid="stDataFrame"] table {
         risk_payload = data["risk_payload"]
         student_ids = data["student_ids"]
         topic_ids = data["topic_ids"]
-        mode = data["mode"]
         api_base = data["api_base"]
         api_timeout_s = data["api_timeout_s"]
 
@@ -612,7 +590,7 @@ div[data-testid="stDataFrame"] table {
     c3.metric("🟠 Learning cells", learning_n)
     c4.metric("🔴 At-Risk cells", at_risk_n)
     st.markdown(
-        f'<div class="soft-card"><b>Mode:</b> {mode} &nbsp;|&nbsp; '
+        f'<div class="soft-card"><b>Data source:</b> live_state (Postgres + API events) &nbsp;|&nbsp; '
         f"<b>Hierarchy source:</b> <code>{SKILL_HIERARCHY_XLSX.name}</code></div>",
         unsafe_allow_html=True,
     )
@@ -704,7 +682,7 @@ div[data-testid="stDataFrame"] table {
 
     fig = build_heatmap(
         df,
-        title=f"Classroom Mastery Heatmap · {len(topic_ids)} topics · mode={payload.get('mode')}",
+        title=f"Classroom Mastery Heatmap · {len(topic_ids)} topics · live_state",
     )
     st.markdown('<div class="matrix-scroll">', unsafe_allow_html=True)
     st.plotly_chart(
@@ -759,7 +737,6 @@ div[data-testid="stDataFrame"] table {
             profile = fetch_student_profile(
                 api_base=api_base,
                 user_id=str(selected_student),
-                mode=mode,
                 timeout_s=float(api_timeout_s),
             )
     except requests.RequestException as exc:
@@ -882,7 +859,7 @@ div[data-testid="stDataFrame"] table {
     if distractor_source == "question_engine_live":
         st.caption("Misconception Cloud uses live Question Engine distractor labels.")
     elif distractor_source:
-        st.caption("Misconception Cloud uses simulated tags from synthetic log replay (no live attempts yet).")
+        st.caption("Misconception Cloud aggregates distractor labels from live Question Engine attempts.")
 
     misconceptions_df = pd.DataFrame(profile.get("assessment_insights", {}).get("most_frequent_distractor_tags") or [])
     if not misconceptions_df.empty:

@@ -274,6 +274,7 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
 
 _default_bkt: Optional[ScienceBKT] = None
 _DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+_LLM_CLIENT_CACHE: Optional[tuple[Any, str]] = None
 _frustration_state: dict[tuple[str, str], "FrustrationSignal"] = {}
 _last_resolved_topic_by_user: dict[str, str] = {}
 
@@ -582,7 +583,10 @@ def _tone_guidance_from_frustration(resolution: FrustrationResolution) -> str:
 def _get_default_bkt() -> ScienceBKT:
     global _default_bkt
     if _default_bkt is None:
-        _default_bkt = ScienceBKT(data_path="synthetic_logs.csv")
+        _default_bkt = ScienceBKT(
+            params_source="postgres",
+            persist_mastery=True,
+        )
         _default_bkt.initialize_skills()
     return _default_bkt
 
@@ -597,7 +601,8 @@ def get_shared_bkt_engine() -> ScienceBKT:
 
 
 def _make_llm_client() -> tuple[Any, str]:
-    """Return (ChatGroq client, model_name)."""
+    """Return (ChatGroq client, model_name). Reuses one client per process."""
+    global _LLM_CLIENT_CACHE
     load_dotenv(_ENV_PATH)
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
@@ -608,6 +613,10 @@ def _make_llm_client() -> tuple[Any, str]:
         os.environ.get("GROQ_MODEL_NAME", _DEFAULT_GROQ_MODEL).strip()
         or _DEFAULT_GROQ_MODEL
     )
+    if _LLM_CLIENT_CACHE is not None:
+        cached_client, cached_model = _LLM_CLIENT_CACHE
+        if cached_model == model:
+            return cached_client, cached_model
     temp_raw = os.environ.get("TUTOR_LLM_TEMPERATURE", "").strip()
     temperature = 0.35
     if temp_raw:
@@ -627,6 +636,7 @@ def _make_llm_client() -> tuple[Any, str]:
     if "gpt-oss" in model.lower():
         client_kwargs["reasoning_effort"] = "low"
     client = ChatGroq(**client_kwargs)
+    _LLM_CLIENT_CACHE = (client, model)
     return client, model
 
 

@@ -13,9 +13,9 @@ From repo root (learner-analytics-genai-support/). Run these in **separate termi
 
 .\.venv\Scripts\Activate.ps1
 cd FastAPI-Backend
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8003
 
-One liner alternative --- .\.venv\Scripts\Activate.ps1; cd FastAPI-Backend; uvicorn main:app --reload --host 127.0.0.1 --port 8000
+One liner alternative --- .\.venv\Scripts\Activate.ps1; cd FastAPI-Backend; uvicorn main:app --reload --host 127.0.0.1 --port 8003
 
 **3. Frontends (Streamlit) — use a different port for each app**
 
@@ -39,7 +39,7 @@ streamlit run Streamlit-UIs/teacher_dashboard.py --server.port 8502
 | Part | Role |
 |------|------|
 | **FastAPI backend** | REST API — BKT updates, tutor hints, mastery matrix, integration endpoints |
-| **BKT engine** | Bayesian Knowledge Tracing on synthetic learner logs |
+| **BKT engine** | Bayesian Knowledge Tracing — params from Postgres, mastery from live attempts |
 | **Knowledge base (RAG)** | ChromaDB + local embeddings over Grade 6 Science syllabus PDF |
 | **Socratic tutor** | LLM hints grounded in RAG + current mastery state |
 | **Teacher dashboard** | Streamlit heatmap — students × topics mastery |
@@ -64,7 +64,6 @@ learner-analytics-genai-support/
 ├── README.md
 │
 ├── Data/                         # static input data (committed)
-│   ├── synthetic_logs.csv
 │   ├── Skill-Heirarchies.xlsx
 │   ├── Rubrics/hitl_rubric_template.csv
 │   └── Syllabi/
@@ -109,11 +108,14 @@ python -m venv .venv
 pip install -r requirements.txt
 `
 
-Copy or create .env at repo root with at least:
+Copy or create `.env` at repo root with at least:
 
-`	ext
+```text
 GROQ_API_KEY=your_key_here
-`
+DATABASE_URL=postgresql://...   # Neon / Postgres (BKT params + learner analytics tables)
+```
+
+Analytics (teacher dashboard, student profile, mastery matrix) use **live_state only** — real attempts from Question Engine, tutor turns, and `bkt_mastery` in Postgres. No synthetic CSV replay at runtime.
 
 ---
 
@@ -139,14 +141,14 @@ python knowledge_base.py --rebuild --topic G6_S8_ELE_CIRCUITS
 
 ### Scripts
 
-From repo root:
+From repo root (optional offline research scripts only):
 
-`powershell
-# Regenerate Data/synthetic_logs.csv from Skill-Heirarchies.xlsx
+```powershell
+# Generate synthetic training CSV for Scripts/evaluation.py (not used by the API)
 python Scripts/generate_data.py
 
-# BKT evaluation (in-sample + user holdout)
+# BKT evaluation (in-sample + user holdout) — requires synthetic_logs.csv
 python Scripts/evaluation.py
-`
+```
 
 Evaluation outputs are written to evaluation_outputs/ at repo root by default.

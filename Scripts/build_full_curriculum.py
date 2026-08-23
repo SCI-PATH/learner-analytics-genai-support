@@ -10,11 +10,13 @@ Sources of truth (Sri Lankan Educational Publications Department textbooks):
 Writes:
   - Data/Skill-Heirarchies-G6-G9.xlsx  (runtime source)
   - Data/Skill-Heirarchies-G6-G9-Full-Chapters.xlsx  (shareable team copy)
+  - Data/chapter_ids_g6_g9.csv  (shared G{grade}_C{chapter} keys for Component 2)
   - FastAPI-Backend/curriculum_topics.py  (keywords / boosts for RAG + routing)
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 from pathlib import Path
@@ -592,6 +594,7 @@ def write_excel(rows: list[dict[str, Any]], path: Path) -> None:
     headers = [
         "Grade",
         "Chapter",
+        "Chapter ID",
         "Chapter Title",
         "Part",
         "Core Concept",
@@ -607,12 +610,13 @@ def write_excel(rows: list[dict[str, Any]], path: Path) -> None:
     last_grade = None
     for r in rows:
         if r["grade"] != last_grade:
-            ws.append([f"GRADE {r['grade']}", "", "", "", "", "", "", "", ""])
+            ws.append([f"GRADE {r['grade']}", "", "", "", "", "", "", "", "", ""])
             last_grade = r["grade"]
         ws.append(
             [
                 r["grade"],
                 r["chapter"],
+                f"G{r['grade']}_C{r['chapter']}",
                 r["chapter_title"],
                 r["part"],
                 r["chapter_title"],
@@ -625,7 +629,7 @@ def write_excel(rows: list[dict[str, Any]], path: Path) -> None:
 
     # Second sheet: chapter coverage summary
     ws2 = wb.create_sheet("Chapter Coverage")
-    ws2.append(["Grade", "Chapter", "Chapter Title", "Part", "Skill Count", "Topic IDs"])
+    ws2.append(["Chapter ID", "Grade", "Chapter", "Chapter Title", "Part", "Skill Count", "Topic IDs"])
     for cell in ws2[1]:
         cell.font = Font(bold=True)
     from collections import defaultdict
@@ -637,6 +641,7 @@ def write_excel(rows: list[dict[str, Any]], path: Path) -> None:
         items = grouped[(g, c)]
         ws2.append(
             [
+                f"G{g}_C{c}",
                 g,
                 c,
                 items[0]["chapter_title"],
@@ -649,6 +654,55 @@ def write_excel(rows: list[dict[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     print(f"Wrote {path} ({len(rows)} skills)")
+
+
+def write_chapter_csv(rows: list[dict[str, Any]], path: Path) -> None:
+    """Shareable chapter_id catalog for Component 2 (one row per chapter)."""
+    from collections import OrderedDict
+
+    chapters: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for r in rows:
+        cid = f"G{int(r['grade'])}_C{int(r['chapter'])}"
+        rec = chapters.setdefault(
+            cid,
+            {
+                "chapter_id": cid,
+                "grade": int(r["grade"]),
+                "chapter": int(r["chapter"]),
+                "chapter_title": r["chapter_title"],
+                "topic_ids": [],
+            },
+        )
+        rec["topic_ids"].append(r["topic_id"])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "chapter_id",
+                "grade",
+                "chapter",
+                "chapter_title",
+                "topic_id_1",
+                "topic_id_2",
+            ]
+        )
+        for rec in chapters.values():
+            tids = list(rec["topic_ids"])
+            while len(tids) < 2:
+                tids.append("")
+            writer.writerow(
+                [
+                    rec["chapter_id"],
+                    rec["grade"],
+                    rec["chapter"],
+                    rec["chapter_title"],
+                    tids[0],
+                    tids[1],
+                ]
+            )
+    print(f"Wrote {path} ({len(chapters)} chapters)")
 
 
 def write_curriculum_py(rows: list[dict[str, Any]], path: Path) -> None:
@@ -679,7 +733,8 @@ Skills: {len(topic_ids)} across grades 6–9 (full chapter coverage).
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Optional
 
 # Canonical ordered topic IDs
 TOPIC_IDS: list[str] = {json.dumps(topic_ids, indent=4)}
@@ -760,6 +815,94 @@ def normalize_topic_id(topic_id: str) -> str:
     return OLD_TO_NEW_TOPIC_ID.get(tid, tid)
 
 
+_CHAPTER_ID_RE = re.compile(r"^G(\\d+)[_-]C(\\d+)$", re.IGNORECASE)
+_TOPIC_CHAPTER_PREFIX_RE = re.compile(r"^G(\\d+)_C(\\d+)(?:_|$)", re.IGNORECASE)
+
+
+def canonical_chapter_id(grade: int, chapter: int) -> str:
+    """Return the shared chapter key, e.g. G6_C8."""
+    return f"G{{int(grade)}}_C{{int(chapter)}}"
+
+
+def chapter_id_for_topic(topic_id: str) -> Optional[str]:
+    """Map a canonical (or legacy) topic_id to G{{grade}}_C{{chapter}}."""
+    tid = normalize_topic_id(topic_id)
+    meta = TOPIC_META.get(tid)
+    if meta:
+        return canonical_chapter_id(meta["grade"], meta["chapter"])
+    match = _TOPIC_CHAPTER_PREFIX_RE.match(tid)
+    if match:
+        return canonical_chapter_id(int(match.group(1)), int(match.group(2)))
+    return None
+
+
+def normalize_chapter_id(value: str) -> Optional[str]:
+    """
+    Normalize a chapter key to G{{grade}}_C{{chapter}}.
+
+    Accepts ``G6_C8``, ``g6-c8``, or a full topic_id such as ``G6_C8_ELE_CIRCUITS``.
+    Returns None when the string cannot be parsed.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    tid = normalize_topic_id(raw)
+    if tid in TOPIC_META:
+        return chapter_id_for_topic(tid)
+    match = _CHAPTER_ID_RE.fullmatch(raw)
+    if match:
+        return canonical_chapter_id(int(match.group(1)), int(match.group(2)))
+    return chapter_id_for_topic(raw)
+
+
+def topic_ids_for_chapter(chapter_id: str) -> list[str]:
+    """Return ordered canonical topic_ids for one chapter (usually two skills)."""
+    cid = normalize_chapter_id(chapter_id)
+    if not cid:
+        return []
+    match = _CHAPTER_ID_RE.fullmatch(cid)
+    if not match:
+        return []
+    grade = int(match.group(1))
+    chapter = int(match.group(2))
+    return [
+        tid
+        for tid in TOPIC_IDS
+        if int(TOPIC_META[tid]["grade"]) == grade and int(TOPIC_META[tid]["chapter"]) == chapter
+    ]
+
+
+def resolve_chapter_scope(chapter_ids: list[str]) -> dict[str, Any]:
+    """
+    Deduplicate and resolve chapter keys to topic_ids.
+
+    Unknown / empty chapters are listed in ``unknown_chapter_ids`` and skipped.
+    """
+    resolved: list[str] = []
+    unknown: list[str] = []
+    topics_by_chapter: dict[str, list[str]] = {{}}
+    all_topics: list[str] = []
+    seen: set[str] = set()
+    for raw in chapter_ids:
+        cid = normalize_chapter_id(raw)
+        topics = topic_ids_for_chapter(cid) if cid else []
+        if not cid or not topics:
+            unknown.append(str(raw))
+            continue
+        if cid in seen:
+            continue
+        seen.add(cid)
+        resolved.append(cid)
+        topics_by_chapter[cid] = topics
+        all_topics.extend(topics)
+    return {{
+        "chapter_ids": resolved,
+        "unknown_chapter_ids": unknown,
+        "topic_ids": all_topics,
+        "topics_by_chapter": topics_by_chapter,
+    }}
+
+
 def chapters_covered() -> dict[int, list[int]]:
     out: dict[int, list[int]] = {{}}
     for tid, m in TOPIC_META.items():
@@ -824,6 +967,7 @@ def main() -> None:
             f"Wrote {alt.name} instead — close Excel and rename/copy over when ready."
         )
     write_curriculum_py(rows, BACKEND_DIR / "curriculum_topics.py")
+    write_chapter_csv(rows, DATA_DIR / "chapter_ids_g6_g9.csv")
     print("Done.")
 
 

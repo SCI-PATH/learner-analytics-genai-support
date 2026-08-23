@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
@@ -49,6 +49,21 @@ from knowledge_base import _TOPIC_KEYWORDS, _TOPIC_QUERY_BOOST, retrieve_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def _load_env() -> None:
+    """Load ``learner-analytics-genai-support/.env``.
+
+    Uses ``utf-8-sig`` so a UTF-8 BOM (common after Windows editors rewrite
+    the file) does not rename the first key. If ``GROQ_API_KEY`` is already
+    in the process environment but blank, the file value wins.
+    """
+    load_dotenv(_ENV_PATH, encoding="utf-8-sig")
+    file_vals = dotenv_values(_ENV_PATH, encoding="utf-8-sig")
+    groq = str(file_vals.get("GROQ_API_KEY") or "").strip()
+    if groq and not os.environ.get("GROQ_API_KEY", "").strip():
+        os.environ["GROQ_API_KEY"] = groq
+
 
 HintMode = Literal["scaffold", "balanced", "nudge"]
 PersonaId = Literal["practical_encourager", "analytical_coach", "curious_explorer"]
@@ -603,7 +618,7 @@ def get_shared_bkt_engine() -> ScienceBKT:
 def _make_llm_client() -> tuple[Any, str]:
     """Return (ChatGroq client, model_name). Reuses one client per process."""
     global _LLM_CLIENT_CACHE
-    load_dotenv(_ENV_PATH)
+    _load_env()
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
@@ -673,7 +688,7 @@ def _tutor_llm_max_tokens() -> int:
 
 def _tutor_bkt_policy() -> Literal["quiz_only", "strict", "legacy"]:
     """How chat turns update BKT; default ``strict`` to avoid falsely rising mastery."""
-    load_dotenv(_ENV_PATH)
+    _load_env()
     raw = (os.environ.get("TUTOR_BKT_POLICY") or "strict").strip().lower()
     if raw in {"quiz_only", "quiz-only", "off", "false", "0", "none", "assessment_only"}:
         return "quiz_only"
@@ -1345,7 +1360,7 @@ def generate_socratic_hint(
     """
     # Ensure .env variables (including HF_TOKEN / GROQ_API_KEY) are available
     # before retrieval and model calls.
-    load_dotenv(_ENV_PATH)
+    _load_env()
 
     if _is_greeting_intent(student_answer):
         return _greeting_opener_response(

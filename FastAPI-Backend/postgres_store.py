@@ -21,6 +21,9 @@ BKT_SKILL_PARAMS_TABLE = "learner_analytics.bkt_skill_params"
 BKT_MASTERY_TABLE = "learner_analytics.bkt_mastery"
 TUTOR_TURNS_TABLE = "learner_analytics.tutor_turns"
 FRUSTRATION_CUES_TABLE = "learner_analytics.frustration_cues"
+SHARED_CLASSES_TABLE = "shared.classes"
+SHARED_CLASS_ENROLLMENTS_TABLE = "shared.class_enrollments"
+SHARED_TOPICS_TABLE = "shared.topics"
 
 
 def _database_url() -> Optional[str]:
@@ -504,25 +507,277 @@ def fetch_tutor_turns_for_learner(learner_id: str, *, limit: int = 10) -> list[d
     return out
 
 
+def fetch_risk_signal_timeline(learner_id: str) -> list[tuple[str, float]]:
+    """Time-ordered (topic_id, signal) for at-risk velocity / recent-performance.
+
+    Quiz attempts contribute 0/1. Tutor turns contribute ``interaction_score``.
+    """
+    timelines = fetch_risk_signal_timelines_for_learners([str(learner_id)])
+    return timelines.get(str(learner_id), [])
+
+
+def fetch_risk_signal_timelines_for_learners(
+    learner_ids: list[str],
+) -> dict[str, list[tuple[str, float]]]:
+    """Batch version of ``fetch_risk_signal_timeline`` (one DB round-trip pair)."""
+    if not postgres_configured() or psycopg is None:
+        return {}
+    ids = [str(uid) for uid in learner_ids if str(uid).strip()]
+    if not ids:
+        return {}
+    events_by_user: dict[str, list[tuple[Any, int, str, float]]] = {uid: [] for uid in ids}
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT learner_id, created_at, topic_id, is_correct
+                    FROM {ASSESSMENT_ATTEMPTS_TABLE}
+                    WHERE learner_id = ANY(%s)
+                    ORDER BY created_at ASC
+                    """,
+                    (ids,),
+                )
+                for learner_id, created_at, topic_id, is_correct in cur.fetchall():
+                    uid = str(learner_id)
+                    topic = str(topic_id or "")
+                    if uid not in events_by_user or not topic:
+                        continue
+                    events_by_user[uid].append(
+                        (created_at, 0, topic, 1.0 if bool(is_correct) else 0.0)
+                    )
+                cur.execute(
+                    f"""
+                    SELECT learner_id, created_at, topic_id, interaction_score
+                    FROM {TUTOR_TURNS_TABLE}
+                    WHERE learner_id = ANY(%s) AND interaction_score IS NOT NULL
+                    ORDER BY created_at ASC
+                    """,
+                    (ids,),
+                )
+                for learner_id, created_at, topic_id, score in cur.fetchall():
+                    uid = str(learner_id)
+                    topic = str(topic_id or "")
+                    if uid not in events_by_user or not topic or score is None:
+                        continue
+                    events_by_user[uid].append(
+                        (
+                            created_at,
+                            1,
+                            topic,
+                            float(max(0.0, min(1.0, float(score)))),
+                        )
+                    )
+    except Exception:
+        return {}
+
+    out: dict[str, list[tuple[str, float]]] = {}
+    for uid, events in events_by_user.items():
+        events.sort(key=lambda row: (row[0] is None, row[0], row[1]))
+        out[uid] = [(topic, value) for _ts, _order, topic, value in events]
+    return out
+
+
+def delete_seed_dashboard_analytics(
+    *,
+    source: str,
+    learner_ids: list[str],
+) -> dict[str, int]:
+    """Remove demo quiz / cue / tutor / mastery rows for a classroom seed."""
+    if not postgres_configured() or psycopg is None:
+        return {"ok": 0, "error": 1}
+    ids = [str(uid) for uid in learner_ids if str(uid).strip()]
+    if not ids:
+        return {}
+    counts: dict[str, int] = {}
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    DELETE FROM {ASSESSMENT_ATTEMPTS_TABLE}
+                    WHERE source = %s AND learner_id = ANY(%s)
+                    """,
+                    (source, ids),
+                )
+                counts["assessment_attempts"] = int(cur.rowcount or 0)
+                cur.execute(
+                    f"""
+                    DELETE FROM {FRUSTRATION_CUES_TABLE}
+                    WHERE source = %s AND learner_id = ANY(%s)
+                    """,
+                    (source, ids),
+                )
+                counts["frustration_cues"] = int(cur.rowcount or 0)
+                cur.execute(
+                    f"""
+                    DELETE FROM {TUTOR_TURNS_TABLE}
+                    WHERE endpoint = %s AND learner_id = ANY(%s)
+                    """,
+                    (source, ids),
+                )
+                counts["tutor_turns"] = int(cur.rowcount or 0)
+                cur.execute(
+                    f"""
+                    DELETE FROM {BKT_MASTERY_TABLE}
+                    WHERE learner_id = ANY(%s)
+                    """,
+                    (ids,),
+                )
+                counts["bkt_mastery"] = int(cur.rowcount or 0)
+            conn.commit()
+    except Exception:
+        return {}
+    return counts
+
+
 def fetch_frustration_scores_for_learner(learner_id: str) -> list[float]:
     """All frustration cue scores for one learner (engagement metrics)."""
+    by_user = fetch_frustration_scores_for_learners([str(learner_id)])
+    return by_user.get(str(learner_id), [])
+
+
+def fetch_frustration_scores_for_learners(
+    learner_ids: list[str],
+) -> dict[str, list[float]]:
+    """Batch frustration cues keyed by learner_id."""
     if not postgres_configured() or psycopg is None:
+        return {}
+    ids = [str(uid) for uid in learner_ids if str(uid).strip()]
+    if not ids:
+        return {}
+    out: dict[str, list[float]] = {uid: [] for uid in ids}
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT learner_id, frustration_score
+                    FROM {FRUSTRATION_CUES_TABLE}
+                    WHERE learner_id = ANY(%s)
+                    ORDER BY recorded_at ASC
+                    """,
+                    (ids,),
+                )
+                for learner_id, score in cur.fetchall():
+                    uid = str(learner_id)
+                    if uid in out and score is not None:
+                        out[uid].append(float(score))
+    except Exception:
+        return {}
+    return out
+
+
+def fetch_class_metadata(class_code: str) -> Optional[dict[str, Any]]:
+    """Return one active class row from ``shared.classes``."""
+    if not postgres_configured() or psycopg is None:
+        return None
+    code = str(class_code or "").strip().upper()
+    if not code:
+        return None
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT class_code, teacher_id, class_name, grade_level, subject, is_active
+                    FROM {SHARED_CLASSES_TABLE}
+                    WHERE class_code = %s
+                    LIMIT 1
+                    """,
+                    (code,),
+                )
+                row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {
+        "class_code": str(row[0]),
+        "teacher_id": str(row[1]),
+        "class_name": str(row[2]),
+        "grade_level": int(row[3]),
+        "subject": str(row[4]),
+        "is_active": bool(row[5]),
+    }
+
+
+def fetch_roster_by_class_code(class_code: str) -> list[str]:
+    """Learner IDs enrolled in ``shared.class_enrollments`` for one class."""
+    if not postgres_configured() or psycopg is None:
+        return []
+    code = str(class_code or "").strip().upper()
+    if not code:
         return []
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT frustration_score
-                    FROM {FRUSTRATION_CUES_TABLE}
-                    WHERE learner_id = %s
-                    ORDER BY recorded_at ASC
+                    SELECT e.learner_id
+                    FROM {SHARED_CLASS_ENROLLMENTS_TABLE} e
+                    JOIN {SHARED_CLASSES_TABLE} c ON c.class_code = e.class_code
+                    WHERE e.class_code = %s
+                      AND c.is_active = TRUE
+                    ORDER BY e.enrolled_at ASC, e.learner_id ASC
                     """,
-                    (str(learner_id),),
+                    (code,),
                 )
-                return [float(row[0]) for row in cur.fetchall() if row and row[0] is not None]
+                return [str(row[0]) for row in cur.fetchall() if row and row[0]]
     except Exception:
         return []
+
+
+def fetch_topic_ids_for_grade(grade_level: int) -> list[str]:
+    """Canonical topic IDs for one grade from ``shared.topics``."""
+    if not postgres_configured() or psycopg is None:
+        return []
+    try:
+        grade = int(grade_level)
+    except (TypeError, ValueError):
+        return []
+    if grade < 6 or grade > 9:
+        return []
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT topic_id
+                    FROM {SHARED_TOPICS_TABLE}
+                    WHERE grade = %s
+                    ORDER BY chapter ASC, topic_id ASC
+                    """,
+                    (grade,),
+                )
+                return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+    except Exception:
+        return []
+
+
+def learner_in_class(learner_id: str, class_code: str) -> bool:
+    """True if ``learner_id`` is enrolled in ``class_code``."""
+    if not postgres_configured() or psycopg is None:
+        return False
+    lid = str(learner_id or "").strip()
+    code = str(class_code or "").strip().upper()
+    if not lid or not code:
+        return False
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT 1
+                    FROM {SHARED_CLASS_ENROLLMENTS_TABLE}
+                    WHERE class_code = %s AND learner_id = %s
+                    LIMIT 1
+                    """,
+                    (code, lid),
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
 
 
 def list_distinct_learner_ids() -> list[str]:
@@ -548,15 +803,155 @@ def list_distinct_learner_ids() -> list[str]:
         return []
 
 
+def _assessment_attempt_record_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    (
+        lid,
+        topic_id,
+        is_correct,
+        question_type,
+        distractor_tag,
+        distractor_label,
+        chosen_distractor_text,
+        similarity_score,
+        score_reasoning,
+        error_category,
+        missed_blanks,
+        response_time_s,
+        difficulty_level,
+        subtopic_id,
+        question_id,
+        source,
+        p_l_after,
+        created_at,
+    ) = row
+    record: dict[str, Any] = {
+        "user_id": str(lid),
+        "topic_id": str(topic_id),
+        "is_correct": bool(is_correct),
+        "label": 1 if bool(is_correct) else 0,
+        "timestamp": created_at.isoformat() if created_at is not None else None,
+    }
+    if question_type is not None:
+        record["question_type"] = question_type
+    if distractor_tag is not None:
+        record["distractor_tag"] = distractor_tag
+    if distractor_label is not None:
+        record["distractor_label"] = distractor_label
+    if chosen_distractor_text is not None:
+        record["chosen_distractor_text"] = chosen_distractor_text
+    if similarity_score is not None:
+        record["similarity_score"] = float(similarity_score)
+    if score_reasoning is not None:
+        record["detailed_explanation"] = score_reasoning
+    if error_category is not None:
+        record["error_category"] = error_category
+    if missed_blanks is not None:
+        record["missed_blanks"] = missed_blanks
+    if response_time_s is not None:
+        record["response_time_s"] = float(response_time_s)
+    if difficulty_level is not None:
+        record["difficulty_level"] = difficulty_level
+    if subtopic_id is not None:
+        record["subtopic_id"] = subtopic_id
+    if question_id is not None:
+        record["question_id"] = question_id
+    if source is not None:
+        record["source"] = source
+    if p_l_after is not None:
+        record["updated_mastery_probability"] = float(p_l_after)
+    return record
+
+
+_ASSESSMENT_ATTEMPT_SELECT = f"""
+    learner_id,
+    topic_id,
+    is_correct,
+    question_type,
+    distractor_tag,
+    distractor_label,
+    chosen_distractor_text,
+    similarity_score,
+    score_reasoning,
+    error_category,
+    missed_blanks,
+    response_time_s,
+    difficulty_level,
+    subtopic_id,
+    question_id,
+    source,
+    p_l_after,
+    created_at
+"""
+
+
 def fetch_assessment_attempts_for_learner(
     learner_id: str,
     *,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
     """Recent assessment attempts for profile / misconception analytics."""
+    by_user = fetch_assessment_attempts_for_learners([str(learner_id)], limit_per_learner=limit)
+    return by_user.get(str(learner_id), [])
+
+
+def fetch_assessment_attempts_for_learners(
+    learner_ids: list[str],
+    *,
+    limit_per_learner: int = 500,
+) -> dict[str, list[dict[str, Any]]]:
+    """Batch assessment attempts keyed by learner_id (oldest→newest)."""
     if not postgres_configured() or psycopg is None:
-        return []
-    lim = max(1, min(int(limit), 2000))
+        return {}
+    ids = [str(uid) for uid in learner_ids if str(uid).strip()]
+    if not ids:
+        return {}
+    lim = max(1, min(int(limit_per_learner), 2000))
+    out: dict[str, list[dict[str, Any]]] = {uid: [] for uid in ids}
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                # Keep the newest ``lim`` rows per learner, then restore ASC order.
+                cur.execute(
+                    f"""
+                    SELECT {_ASSESSMENT_ATTEMPT_SELECT}
+                    FROM (
+                        SELECT
+                            {_ASSESSMENT_ATTEMPT_SELECT},
+                            ROW_NUMBER() OVER (
+                                PARTITION BY learner_id
+                                ORDER BY created_at DESC
+                            ) AS rn
+                        FROM {ASSESSMENT_ATTEMPTS_TABLE}
+                        WHERE learner_id = ANY(%s)
+                    ) ranked
+                    WHERE rn <= %s
+                    ORDER BY learner_id ASC, created_at ASC
+                    """,
+                    (ids, lim),
+                )
+                for row in cur.fetchall():
+                    record = _assessment_attempt_record_from_row(row)
+                    uid = str(record["user_id"])
+                    if uid in out:
+                        out[uid].append(record)
+    except Exception:
+        return {}
+    return out
+
+
+def fetch_tutor_turns_for_learners(
+    learner_ids: list[str],
+    *,
+    limit_per_learner: int = 10,
+) -> dict[str, list[dict[str, Any]]]:
+    """Batch recent tutor turns keyed by learner_id (oldest→newest within each)."""
+    if not postgres_configured() or psycopg is None:
+        return {}
+    ids = [str(uid) for uid in learner_ids if str(uid).strip()]
+    if not ids:
+        return {}
+    lim = max(1, min(int(limit_per_learner), 100))
+    out: dict[str, list[dict[str, Any]]] = {uid: [] for uid in ids}
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
@@ -565,89 +960,91 @@ def fetch_assessment_attempts_for_learner(
                     SELECT
                         learner_id,
                         topic_id,
-                        is_correct,
-                        question_type,
-                        distractor_tag,
-                        distractor_label,
-                        chosen_distractor_text,
-                        similarity_score,
-                        score_reasoning,
-                        error_category,
-                        missed_blanks,
-                        response_time_s,
-                        difficulty_level,
-                        subtopic_id,
-                        question_id,
-                        source,
-                        p_l_after,
+                        student_message,
+                        tutor_hint,
+                        persona_id,
+                        hint_mode,
+                        interaction_score,
+                        critical_confusion,
+                        topic_inferred,
+                        frustration_level_used,
+                        frustration_source_tag,
+                        frustration_effective_score,
+                        bkt_updated,
+                        endpoint,
                         created_at
-                    FROM {ASSESSMENT_ATTEMPTS_TABLE}
-                    WHERE learner_id = %s
-                    ORDER BY created_at ASC
-                    LIMIT %s
+                    FROM (
+                        SELECT
+                            learner_id,
+                            topic_id,
+                            student_message,
+                            tutor_hint,
+                            persona_id,
+                            hint_mode,
+                            interaction_score,
+                            critical_confusion,
+                            topic_inferred,
+                            frustration_level_used,
+                            frustration_source_tag,
+                            frustration_effective_score,
+                            bkt_updated,
+                            endpoint,
+                            created_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY learner_id
+                                ORDER BY created_at DESC
+                            ) AS rn
+                        FROM {TUTOR_TURNS_TABLE}
+                        WHERE learner_id = ANY(%s)
+                    ) ranked
+                    WHERE rn <= %s
+                    ORDER BY learner_id ASC, created_at ASC
                     """,
-                    (str(learner_id), lim),
+                    (ids, lim),
                 )
                 rows = cur.fetchall()
     except Exception:
-        return []
+        return {}
 
-    out: list[dict[str, Any]] = []
     for row in rows:
         (
             lid,
             topic_id,
-            is_correct,
-            question_type,
-            distractor_tag,
-            distractor_label,
-            chosen_distractor_text,
-            similarity_score,
-            score_reasoning,
-            error_category,
-            missed_blanks,
-            response_time_s,
-            difficulty_level,
-            subtopic_id,
-            question_id,
-            source,
-            p_l_after,
+            student_message,
+            tutor_hint,
+            persona_id,
+            hint_mode,
+            interaction_score,
+            critical_confusion,
+            topic_inferred,
+            frustration_level_used,
+            frustration_source_tag,
+            frustration_effective_score,
+            bkt_updated,
+            endpoint,
             created_at,
         ) = row
-        record: dict[str, Any] = {
-            "user_id": str(lid),
-            "topic_id": str(topic_id),
-            "is_correct": bool(is_correct),
-            "label": 1 if bool(is_correct) else 0,
-            "timestamp": created_at.isoformat() if created_at is not None else None,
-        }
-        if question_type is not None:
-            record["question_type"] = question_type
-        if distractor_tag is not None:
-            record["distractor_tag"] = distractor_tag
-        if distractor_label is not None:
-            record["distractor_label"] = distractor_label
-        if chosen_distractor_text is not None:
-            record["chosen_distractor_text"] = chosen_distractor_text
-        if similarity_score is not None:
-            record["similarity_score"] = float(similarity_score)
-        if score_reasoning is not None:
-            record["detailed_explanation"] = score_reasoning
-        if error_category is not None:
-            record["error_category"] = error_category
-        if missed_blanks is not None:
-            record["missed_blanks"] = missed_blanks
-        if response_time_s is not None:
-            record["response_time_s"] = float(response_time_s)
-        if difficulty_level is not None:
-            record["difficulty_level"] = difficulty_level
-        if subtopic_id is not None:
-            record["subtopic_id"] = subtopic_id
-        if question_id is not None:
-            record["question_id"] = question_id
-        if source is not None:
-            record["source"] = source
-        if p_l_after is not None:
-            record["updated_mastery_probability"] = float(p_l_after)
-        out.append(record)
+        uid = str(lid)
+        if uid not in out:
+            continue
+        ts = created_at.isoformat() if created_at is not None else None
+        out[uid].append(
+            {
+                "user_id": uid,
+                "topic_id": str(topic_id),
+                "student_message": student_message,
+                "tutor_hint": tutor_hint,
+                "persona_id": persona_id,
+                "hint_mode": hint_mode,
+                "interaction_score": interaction_score,
+                "critical_confusion": bool(critical_confusion),
+                "topic_inferred": bool(topic_inferred),
+                "frustration_level_used": frustration_level_used,
+                "source_tag": frustration_source_tag,
+                "effective_score": frustration_effective_score,
+                "bkt_updated": bool(bkt_updated),
+                "endpoint": endpoint,
+                "timestamp": ts,
+            }
+        )
     return out

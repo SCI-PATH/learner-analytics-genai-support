@@ -19,6 +19,7 @@ Use from code:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -48,6 +49,20 @@ _LEGACY_PDF_SPECS: list[tuple[Path, int]] = [
     (_SYLLABUS_DIR / "science G8 P-I E.pdf", 8),
     (_SYLLABUS_DIR / "science G-9 P-I E.pdf", 9),
 ]
+
+_TEXTBOOK_DIR = Path(
+    os.environ.get("TEXTBOOK_PDF_ROOT", "").strip()
+    or str(_SYLLABUS_DIR / "textbooks")
+)
+_TEXTBOOK_PDF_SPECS: list[tuple[Path, int]] = [
+    (_TEXTBOOK_DIR / "science G-6 E.pdf", 6),
+    (_TEXTBOOK_DIR / "science G-7 P-I E.pdf", 7),
+    (_TEXTBOOK_DIR / "science G-7 P-II E.pdf", 7),
+    (_TEXTBOOK_DIR / "science G8 P-I E.pdf", 8),
+    (_TEXTBOOK_DIR / "science G-8 P-II E.pdf", 8),
+    (_TEXTBOOK_DIR / "science G-9 P-I E.pdf", 9),
+    (_TEXTBOOK_DIR / "Science Part II English G-9.pdf", 9),
+]
 _CHROMA_DIR = PROJECT_ROOT / ".chroma_science_g6_g9"
 _COLLECTION = "science_syllabus_g6_g9"
 _EMBED_MODEL = "all-MiniLM-L6-v2"
@@ -59,14 +74,12 @@ _TOPIC_QUERY_BOOST = TOPIC_QUERY_BOOST
 
 
 def _resolve_pdf_specs() -> list[tuple[Path, int]]:
-    specs = [(p, g) for p, g in _SYLLABUS_PDF_SPECS if p.is_file()]
-    if specs:
-        return specs
-    legacy = [(p, g) for p, g in _LEGACY_PDF_SPECS if p.is_file()]
-    if legacy:
-        return legacy
+    for resolver in (_SYLLABUS_PDF_SPECS, _TEXTBOOK_PDF_SPECS, _LEGACY_PDF_SPECS):
+        specs = [(p, g) for p, g in resolver if p.is_file()]
+        if specs:
+            return specs
     raise FileNotFoundError(
-        "No syllabus PDFs found under Data/Syllabi (Grade folders or root copies)."
+        "No syllabus PDFs found under Data/Syllabi (Grade folders, textbooks mount, or root copies)."
     )
 
 

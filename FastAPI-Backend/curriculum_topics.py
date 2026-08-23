@@ -10,7 +10,8 @@ Skills: 128 across grades 6–9 (full chapter coverage).
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Optional
 
 # Canonical ordered topic IDs
 TOPIC_IDS: list[str] = [
@@ -2347,10 +2348,98 @@ OLD_TO_NEW_TOPIC_ID: dict[str, str] = {
 }
 
 
+_CHAPTER_ID_RE = re.compile(r"^G(\d+)[_-]C(\d+)$", re.IGNORECASE)
+_TOPIC_CHAPTER_PREFIX_RE = re.compile(r"^G(\d+)_C(\d+)(?:_|$)", re.IGNORECASE)
+
+
 def normalize_topic_id(topic_id: str) -> str:
     """Map legacy S-IDs to current C-IDs when possible."""
     tid = str(topic_id or "").strip()
     return OLD_TO_NEW_TOPIC_ID.get(tid, tid)
+
+
+def canonical_chapter_id(grade: int, chapter: int) -> str:
+    """Return the shared chapter key, e.g. G6_C8."""
+    return f"G{int(grade)}_C{int(chapter)}"
+
+
+def chapter_id_for_topic(topic_id: str) -> Optional[str]:
+    """Map a canonical (or legacy) topic_id to G{grade}_C{chapter}."""
+    tid = normalize_topic_id(topic_id)
+    meta = TOPIC_META.get(tid)
+    if meta:
+        return canonical_chapter_id(meta["grade"], meta["chapter"])
+    match = _TOPIC_CHAPTER_PREFIX_RE.match(tid)
+    if match:
+        return canonical_chapter_id(int(match.group(1)), int(match.group(2)))
+    return None
+
+
+def normalize_chapter_id(value: str) -> Optional[str]:
+    """
+    Normalize a chapter key to G{grade}_C{chapter}.
+
+    Accepts ``G6_C8``, ``g6-c8``, or a full topic_id such as ``G6_C8_ELE_CIRCUITS``.
+    Returns None when the string cannot be parsed.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    tid = normalize_topic_id(raw)
+    if tid in TOPIC_META:
+        return chapter_id_for_topic(tid)
+    match = _CHAPTER_ID_RE.fullmatch(raw)
+    if match:
+        return canonical_chapter_id(int(match.group(1)), int(match.group(2)))
+    return chapter_id_for_topic(raw)
+
+
+def topic_ids_for_chapter(chapter_id: str) -> list[str]:
+    """Return ordered canonical topic_ids for one chapter (usually two skills)."""
+    cid = normalize_chapter_id(chapter_id)
+    if not cid:
+        return []
+    match = _CHAPTER_ID_RE.fullmatch(cid)
+    if not match:
+        return []
+    grade = int(match.group(1))
+    chapter = int(match.group(2))
+    return [
+        tid
+        for tid in TOPIC_IDS
+        if int(TOPIC_META[tid]["grade"]) == grade and int(TOPIC_META[tid]["chapter"]) == chapter
+    ]
+
+
+def resolve_chapter_scope(chapter_ids: list[str]) -> dict[str, Any]:
+    """
+    Deduplicate and resolve chapter keys to topic_ids.
+
+    Unknown / empty chapters are listed in ``unknown_chapter_ids`` and skipped.
+    """
+    resolved: list[str] = []
+    unknown: list[str] = []
+    topics_by_chapter: dict[str, list[str]] = {}
+    all_topics: list[str] = []
+    seen: set[str] = set()
+    for raw in chapter_ids:
+        cid = normalize_chapter_id(raw)
+        topics = topic_ids_for_chapter(cid) if cid else []
+        if not cid or not topics:
+            unknown.append(str(raw))
+            continue
+        if cid in seen:
+            continue
+        seen.add(cid)
+        resolved.append(cid)
+        topics_by_chapter[cid] = topics
+        all_topics.extend(topics)
+    return {
+        "chapter_ids": resolved,
+        "unknown_chapter_ids": unknown,
+        "topic_ids": all_topics,
+        "topics_by_chapter": topics_by_chapter,
+    }
 
 
 def chapters_covered() -> dict[int, list[int]]:

@@ -445,6 +445,18 @@ class ScienceBKT:
         else:
             self.skill_params[skill_name] = self._extract_skill_params(skill_name, skill_df)
 
+    def clear_runtime_state_for_learners(self, user_ids: list[str]) -> int:
+        """Drop in-memory mastery so the next update reloads from Postgres (or prior)."""
+        ids = {str(uid) for uid in user_ids if str(uid).strip()}
+        removed = 0
+        for uid in ids:
+            self._db_prefetched_users.discard(uid)
+            self.at_risk_flags.pop(uid, None)
+        for key in [k for k in list(self.student_state.keys()) if str(k[0]) in ids]:
+            del self.student_state[key]
+            removed += 1
+        return removed
+
     def prefetch_learner_states(self, user_id: str) -> None:
         """Bulk-load persisted mastery for one learner (single Postgres round trip)."""
         uid = str(user_id)

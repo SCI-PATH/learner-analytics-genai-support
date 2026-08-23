@@ -19,24 +19,39 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import threading
+import time
 from typing import Any, Literal, Optional
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, Path as ApiPath
+from dotenv import dotenv_values, load_dotenv
+from fastapi import FastAPI, Path as ApiPath, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+_ENV_PATH = PROJECT_ROOT / ".env"
+load_dotenv(_ENV_PATH, encoding="utf-8-sig")
+_groq_from_file = str(dotenv_values(_ENV_PATH, encoding="utf-8-sig").get("GROQ_API_KEY") or "").strip()
+if _groq_from_file and not os.environ.get("GROQ_API_KEY", "").strip():
+    os.environ["GROQ_API_KEY"] = _groq_from_file
 
 from bkt_engine import ScienceBKT
 from postgres_store import (
     fetch_assessment_attempts_for_learner,
+    fetch_assessment_attempts_for_learners,
+    fetch_class_metadata,
     fetch_frustration_scores_for_learner,
+    fetch_frustration_scores_for_learners,
+    fetch_risk_signal_timeline,
+    fetch_risk_signal_timelines_for_learners,
+    fetch_roster_by_class_code,
+    fetch_topic_ids_for_grade,
     fetch_tutor_turns_for_learner,
+    fetch_tutor_turns_for_learners,
     insert_assessment_attempt,
     insert_frustration_cue,
     insert_tutor_turn,
+    learner_in_class,
     list_distinct_learner_ids,
     postgres_configured,
 )
@@ -51,13 +66,20 @@ app = FastAPI(
     title="Socratic Tutor API",
     description=(
         "Component 4 — Learner Profile Analytics & GenAI Support.\n\n"
-        "**Question Engine / Content Gen (read mastery):** "
+        "**Question Engine (quiz start):** `POST /api/v1/quiz/bkt-snapshot` returns current BKT "
+        "P(L) + `mastery_category` for every topic in the requested chapter(s), without recording "
+        "an attempt.\n\n"
+        "**Question Engine / Content Gen (read one topic):** "
         "`GET /api/v1/mastery/{user_id}/{topic_id}` returns current BKT P(L) and "
         "`mastery_category` (`basic` / `intermediate` / `advanced`) without recording an attempt.\n\n"
         "**Question Engine (write attempt):** `POST /api/v1/assessment-submit` records a scored "
-        "quiz item, updates BKT, and returns the new P(L) + category.\n\n"
+        "quiz item, updates BKT, and returns the new P(L) + category plus a `topic_bkt` map for "
+        "the active chapter(s).\n\n"
         "**Student focus areas:** `GET /api/v1/analytics/student-focus-areas/{user_id}` lists "
         "at-risk topics for one learner (student profile).\n\n"
+        "**Teacher Classroom Insights (fast path):** "
+        "`GET /api/v1/analytics/classroom-dashboard?class_code=…` returns mastery matrix, "
+        "at-risk feed, and class-summary in one pass.\n\n"
         "Interactive docs: `/docs` (Swagger) and `/redoc`."
     ),
     version="0.1.0",
@@ -69,9 +91,10 @@ app = FastAPI(
         {
             "name": "Mastery",
             "description": (
-                "BKT mastery read/update. Question Engine writes scored attempts via "
-                "**POST /api/v1/assessment-submit**. Read current P(L) with "
-                "**GET /api/v1/mastery/{user_id}/{topic_id}**."
+            "BKT mastery read/update. Question Engine starts a quiz with "
+            "**POST /api/v1/quiz/bkt-snapshot**, writes scored attempts via "
+            "**POST /api/v1/assessment-submit**, and can still read one topic with "
+            "**GET /api/v1/mastery/{user_id}/{topic_id}**."
             ),
         },
         {
@@ -91,7 +114,8 @@ app = FastAPI(
         {
             "name": "Analytics",
             "description": (
-                "Teacher dashboard (matrix, at-risk) and student profile / focus areas."
+                "Teacher dashboard (matrix, at-risk, class-summary) and student "
+                "profile / focus areas."
             ),
         },
     ],
@@ -114,6 +138,9 @@ _latest_topic_by_user: dict[str, str] = {}
 _frustration_history: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=50))
 _chat_history_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=100))
 _assessment_attempts_by_user: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=500))
+# Avoid re-reading Neon risk timelines on every matrix/at-risk/summary call.
+_signal_rebuild_monotonic: dict[str, float] = {}
+_SIGNAL_REBUILD_TTL_S = float(os.environ.get("ANALYTICS_SIGNAL_CACHE_TTL_S", "45") or 45)
 QuestionType = Literal["MCQ", "ShortAnswer", "MultiBlank", "TrueFalse"]
 DistractorTag = Literal["NEAR_MISS", "MISCONCEPTION", "COMPLETE_MISS"]
 ErrorCategory = Literal[
@@ -135,11 +162,16 @@ _QUESTION_TYPE_ALIASES = {
 }
 MasteryCategory = Literal["basic", "intermediate", "advanced"]
 _SLIP_HIGH_THRESHOLD = 0.15
+_GUESS_HIGH_THRESHOLD = 0.20
 _MASTERY_LOW_THRESHOLD = 0.45
 _MASTERY_CRITICAL_THRESHOLD = 0.20
 # Shared bands for tutor hint mode, dashboard heatmap, and teammate DDA.
 _MASTERY_BASIC_MAX = 0.50
 _MASTERY_ADVANCED_MIN = 0.80
+# Research dashboard: high Socratic engagement vs low quiz mastery.
+_ENGAGEMENT_GAP_ENGAGEMENT_MIN = 0.70
+_ENGAGEMENT_GAP_MASTERY_MAX = 0.50
+_FRUSTRATION_ELEVATED_THRESHOLD = 0.60
 
 
 def _mastery_category_from_pl(mastery: float) -> MasteryCategory:
@@ -155,11 +187,57 @@ def _mastery_category_from_pl(mastery: float) -> MasteryCategory:
 def _mastery_category_payload(mastery: float) -> dict[str, Any]:
     return {
         "mastery_category": _mastery_category_from_pl(mastery),
-        "mastery_category_thresholds": {
-            "basic": f"P(L) < {_MASTERY_BASIC_MAX:.2f}",
-            "intermediate": f"{_MASTERY_BASIC_MAX:.2f} <= P(L) < {_MASTERY_ADVANCED_MIN:.2f}",
-            "advanced": f"P(L) >= {_MASTERY_ADVANCED_MIN:.2f}",
-        },
+        "mastery_category_thresholds": _mastery_category_thresholds(),
+    }
+
+
+def _mastery_category_thresholds() -> dict[str, str]:
+    return {
+        "basic": f"P(L) < {_MASTERY_BASIC_MAX:.2f}",
+        "intermediate": f"{_MASTERY_BASIC_MAX:.2f} <= P(L) < {_MASTERY_ADVANCED_MIN:.2f}",
+        "advanced": f"P(L) >= {_MASTERY_ADVANCED_MIN:.2f}",
+    }
+
+
+def _topic_bkt_entry(engine: ScienceBKT, user_id: str, topic_id: str) -> dict[str, Any]:
+    """Read-only per-topic BKT row for Question Engine session memory."""
+    mastery = float(engine.get_current_mastery_probability(user_id, topic_id))
+    state = engine.student_state.get((str(user_id), str(topic_id)), {})
+    attempts = int(state.get("attempts", 0)) if isinstance(state, dict) else 0
+    return {
+        "mastery_probability": mastery,
+        "mastery_category": _mastery_category_from_pl(mastery),
+        "attempts": attempts,
+        "seen": attempts > 0,
+    }
+
+
+def _build_quiz_bkt_snapshot(user_id: str, chapter_ids: list[str]) -> dict[str, Any]:
+    """Chapter-scoped BKT map. Does not record a new attempt."""
+    from curriculum_topics import resolve_chapter_scope
+
+    scope = resolve_chapter_scope(chapter_ids)
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    engine.prefetch_learner_states(str(user_id))
+    known_topics = set(engine.skill_map.keys()) if engine.skill_map else set()
+    topic_bkt: dict[str, Any] = {}
+    for tid in scope["topic_ids"]:
+        if known_topics and tid not in known_topics:
+            topic_bkt[tid] = None
+            continue
+        try:
+            topic_bkt[tid] = _topic_bkt_entry(engine, str(user_id), tid)
+        except ValueError:
+            topic_bkt[tid] = None
+    return {
+        "chapter_ids": scope["chapter_ids"],
+        "unknown_chapter_ids": scope["unknown_chapter_ids"],
+        "topic_ids": scope["topic_ids"],
+        "topics_by_chapter": scope["topics_by_chapter"],
+        "topic_bkt": topic_bkt,
+        "mastery_category_thresholds": _mastery_category_thresholds(),
     }
 _LIVE_STATE_DB = PROJECT_ROOT / "live_state_events.db"
 _INTERACTION_LOG_PATH = PROJECT_ROOT / "interaction_logs.json"
@@ -187,6 +265,72 @@ def _append_signal(user_id: str, topic_id: str, value: float) -> None:
     key = (str(user_id), str(topic_id))
     _signal_history[key].append(float(max(0.0, min(1.0, value))))
     _latest_topic_by_user[str(user_id)] = str(topic_id)
+
+
+def _clear_runtime_buffers_for_learners(user_ids: list[str]) -> None:
+    """Drop in-memory analytics buffers so a classroom seed can start from priors."""
+    ids = {str(uid) for uid in user_ids if str(uid).strip()}
+    for key in [k for k in list(_signal_history.keys()) if str(k[0]) in ids]:
+        del _signal_history[key]
+    for key in [k for k in list(_frustration_history.keys()) if str(k[0]) in ids]:
+        del _frustration_history[key]
+    for uid in ids:
+        _latest_topic_by_user.pop(uid, None)
+        _chat_history_by_user.pop(uid, None)
+        _assessment_attempts_by_user.pop(uid, None)
+        _signal_rebuild_monotonic.pop(uid, None)
+
+
+def _apply_signal_timeline(user_id: str, timeline: list[tuple[str, float]]) -> None:
+    """Replace one learner's in-memory risk signals from a prepared timeline."""
+    uid = str(user_id)
+    for key in [k for k in list(_signal_history.keys()) if str(k[0]) == uid]:
+        del _signal_history[key]
+    _latest_topic_by_user.pop(uid, None)
+    for topic_id, value in timeline:
+        _append_signal(uid, topic_id, float(value))
+    _signal_rebuild_monotonic[uid] = time.monotonic()
+
+
+def _rebuild_signals_from_postgres(user_id: str, *, force: bool = False) -> None:
+    """Replace in-memory risk signals from persisted attempts + tutor scores."""
+    if not postgres_configured():
+        return
+    uid = str(user_id)
+    now = time.monotonic()
+    last = _signal_rebuild_monotonic.get(uid)
+    if (
+        not force
+        and last is not None
+        and (now - last) < _SIGNAL_REBUILD_TTL_S
+        and any(k[0] == uid for k in _signal_history)
+    ):
+        return
+    timeline = fetch_risk_signal_timeline(uid)
+    _apply_signal_timeline(uid, timeline)
+
+
+def _rebuild_signals_for_learners(user_ids: list[str], *, force: bool = False) -> None:
+    """Batch-rebuild risk signals for a classroom roster (one Neon round-trip pair)."""
+    if not postgres_configured():
+        return
+    ids = [str(uid) for uid in user_ids if str(uid).strip()]
+    if not ids:
+        return
+    now = time.monotonic()
+    stale = [
+        uid
+        for uid in ids
+        if force
+        or uid not in _signal_rebuild_monotonic
+        or (now - _signal_rebuild_monotonic[uid]) >= _SIGNAL_REBUILD_TTL_S
+        or not any(k[0] == uid for k in _signal_history)
+    ]
+    if not stale:
+        return
+    timelines = fetch_risk_signal_timelines_for_learners(stale)
+    for uid in stale:
+        _apply_signal_timeline(uid, timelines.get(uid, []))
 
 
 def _init_persistence() -> None:
@@ -288,16 +432,20 @@ def _load_persisted_events() -> list[tuple[str, dict[str, Any]]]:
 
 
 def _hydrate_live_state_from_db() -> None:
+    try:
+        if postgres_configured():
+            # Postgres is the source of truth; risk signals are rebuilt per learner
+            # on analytics reads. Replaying sqlite here re-upserts every frustration
+            # cue into Neon and blocks uvicorn startup.
+            return
+    except Exception:
+        pass
     events = _load_persisted_events()
     if not events:
         return
     engine = get_shared_bkt_engine()
     if not engine.skill_map:
         engine.initialize_skills()
-    try:
-        skip_bkt_replay = postgres_configured()
-    except Exception:
-        skip_bkt_replay = False
     for event_type, payload in events:
         if event_type == "assessment_submit":
             uid = str(payload.get("user_id") or "")
@@ -313,13 +461,12 @@ def _hydrate_live_state_from_db() -> None:
                 response_time_s = float(response_time) if response_time is not None else None
             except (TypeError, ValueError):
                 response_time_s = None
-            if not skip_bkt_replay:
-                try:
-                    engine.predict_update(
-                        uid, topic, label, response_time_s, persist=False
-                    )
-                except ValueError:
-                    continue
+            try:
+                engine.predict_update(
+                    uid, topic, label, response_time_s, persist=False
+                )
+            except ValueError:
+                continue
             _append_signal(uid, topic, float(label))
             _record_assessment_attempt(payload)
         elif event_type == "frustration_cue":
@@ -387,6 +534,9 @@ def _risk_criteria_payload() -> dict[str, Any]:
         "negative_velocity_rule": "last_3_signals_strictly_decreasing",
         "alert_rule": "at_least_2_of_3_signals(low_mastery, negative_velocity, weak_recent_performance)",
         "immediate_override_rule": "mastery_below_critical_and_weak_recent_performance",
+        "watchlist_override_rule": (
+            "weak_recent_and_negative_velocity_without_low_mastery_scores_55"
+        ),
     }
 
 
@@ -424,6 +574,9 @@ def _compose_topic_risk_alert(
     if mastery < _MASTERY_CRITICAL_THRESHOLD and weak_recent_perf:
         reasons.append("Critical Low Mastery")
         risk_score = max(risk_score, 85)
+    elif neg_velocity and weak_recent_perf and not low_mastery:
+        # Trend risk while P(L) is still above the low-mastery cut → Watchlist (40–59).
+        risk_score = 55
 
     return {
         "student_id": str(student_id),
@@ -459,6 +612,7 @@ def _build_student_focus_areas(
     """
     uid = str(user_id)
     focus_areas: list[dict[str, Any]] = []
+    _rebuild_signals_from_postgres(uid)
 
     engine = get_shared_bkt_engine()
     if not engine.skill_map:
@@ -793,6 +947,30 @@ class AssessmentSubmitRequest(BaseModel):
         None, description="Full text of chosen wrong MCQ option when label is omitted"
     )
     source: Optional[str] = Field(None, description="Calling module identifier, e.g. question_engine_v1")
+    chapter_ids: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Active quiz chapter keys from Data/chapter_ids_g6_g9.csv, "
+            'e.g. ["G6_C8", "G6_C7"]. Format: G{grade}_C{chapter}. '
+            "When omitted, the response `topic_bkt` map covers only the answered topic's chapter."
+        ),
+        examples=[["G6_C8"], ["G6_C8", "G6_C7"]],
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "user_id": "student_001",
+                    "topic_id": "G6_C8_ELE_CIRCUITS",
+                    "is_correct": True,
+                    "question_type": "MCQ",
+                    "source": "question_engine_v1",
+                    "chapter_ids": ["G6_C8"],
+                }
+            ]
+        }
+    )
 
     @field_validator("question_type", mode="before")
     @classmethod
@@ -818,6 +996,31 @@ class AssessmentSubmitRequest(BaseModel):
         return value
 
 
+class QuizBktSnapshotRequest(BaseModel):
+    """Read-only BKT snapshot for quiz initialization (no attempt recorded)."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"user_id": "student_001", "chapter_ids": ["G6_C8"]},
+                {"user_id": "student_001", "chapter_ids": ["G6_C8", "G6_C7"]},
+            ]
+        }
+    )
+
+    user_id: str = Field(..., description="Student identifier (same ID used on assessment-submit)")
+    chapter_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Chapter keys from Data/chapter_ids_g6_g9.csv. "
+            "Format G{grade}_C{chapter}, e.g. G6_C8. "
+            "Post-lesson: one id. Custom exam: every selected chapter."
+        ),
+        examples=[["G6_C8"], ["G6_C8", "G6_C7"]],
+    )
+
+
 class FrustrationCueSubmitRequest(BaseModel):
     """Engagement module cue for sentiment-aware tutor tone adaptation."""
 
@@ -826,27 +1029,159 @@ class FrustrationCueSubmitRequest(BaseModel):
     frustration_score: float = Field(
         ...,
         ge=0.0,
-        le=1.0,
-        description="Normalized frustration intensity from 0.0 (calm) to 1.0 (high frustration)",
+        le=100.0,
+        description=(
+            "Frustration intensity. Prefer 0.0–1.0. Values above 1.0 (up to 100) "
+            "are treated as a 0–100 score and divided by 100."
+        ),
     )
     source: str = Field(
         "engagement_module",
         description="Producer identifier (e.g., engagement_module_v1)",
     )
 
+    @field_validator("frustration_score")
+    @classmethod
+    def _normalize_frustration_score(cls, value: float) -> float:
+        score = float(value)
+        if score > 1.0:
+            score = score / 100.0
+        return max(0.0, min(1.0, score))
+
 
 class MasteryMatrixRequest(BaseModel):
     """Request payload for classroom mastery matrix (live BKT + Postgres state)."""
 
-    student_ids: list[str] = Field(..., min_length=1, description="List of learner IDs")
-    topic_ids: list[str] = Field(..., min_length=1, description="List of topic/skill IDs")
+    class_code: Optional[str] = Field(
+        None,
+        description=(
+            "When set, roster and grade-scoped topics are resolved from "
+            "``shared.classes`` / ``shared.class_enrollments`` / ``shared.topics``."
+        ),
+        examples=["SCI-G7-492"],
+    )
+    student_ids: Optional[list[str]] = Field(
+        None,
+        min_length=1,
+        description="Manual roster slice (ignored when ``class_code`` is provided).",
+    )
+    topic_ids: Optional[list[str]] = Field(
+        None,
+        min_length=1,
+        description="Manual topic columns (ignored when ``class_code`` is provided).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> "MasteryMatrixRequest":
+        code = (self.class_code or "").strip()
+        if code:
+            return self
+        if not self.student_ids or not self.topic_ids:
+            raise ValueError("Provide class_code or both student_ids and topic_ids.")
+        return self
 
 
 class AtRiskStudentsRequest(BaseModel):
     """Optional filter controls for at-risk analytics."""
 
+    class_code: Optional[str] = Field(
+        None,
+        description=(
+            "When set, roster and grade-scoped topics are resolved from the shared schema."
+        ),
+        examples=["SCI-G7-492"],
+    )
     student_ids: Optional[list[str]] = Field(None, description="Restrict scan to these students")
     topic_ids: Optional[list[str]] = Field(None, description="Restrict scan to these topics")
+
+
+class ResetLearnerRuntimeRequest(BaseModel):
+    """Clear in-memory BKT / signal buffers so a classroom seed can start from priors."""
+
+    learner_ids: list[str] = Field(..., min_length=1)
+    confirm: str = Field(
+        ...,
+        description="Must match the seed source token (seed_g8_class_dashboard).",
+    )
+
+
+def _topic_ids_for_grade_level(grade_level: int, engine: ScienceBKT) -> list[str]:
+    """Grade-scoped topic columns: ``shared.topics`` first, then BKT skill-map prefix."""
+    topic_ids = fetch_topic_ids_for_grade(grade_level)
+    if topic_ids:
+        if engine.skill_map:
+            known = set(engine.skill_map.keys())
+            topic_ids = [tid for tid in topic_ids if tid in known]
+        return topic_ids
+    prefix = f"G{int(grade_level)}_"
+    if engine.skill_map:
+        return sorted(t for t in engine.skill_map if str(t).upper().startswith(prefix))
+    return []
+
+
+def _resolve_class_scope(class_code: str, engine: ScienceBKT) -> dict[str, Any]:
+    """Resolve roster + grade topic columns for one classroom."""
+    code = str(class_code or "").strip().upper()
+    if not code:
+        return {"success": False, "error": "class_code is required."}
+    if not postgres_configured():
+        return {
+            "success": False,
+            "error": (
+                "DATABASE_URL is not configured. Class scoping requires Postgres "
+                "access to shared.classes / shared.class_enrollments."
+            ),
+        }
+    meta = fetch_class_metadata(code)
+    if not meta:
+        return {"success": False, "error": f"Unknown class_code: {code}"}
+    if not meta.get("is_active", True):
+        return {"success": False, "error": f"Class is inactive: {code}"}
+    student_ids = fetch_roster_by_class_code(code)
+    topic_ids = _topic_ids_for_grade_level(int(meta["grade_level"]), engine)
+    return {
+        "success": True,
+        "class_code": meta["class_code"],
+        "class_name": meta["class_name"],
+        "grade_level": int(meta["grade_level"]),
+        "subject": meta.get("subject"),
+        "teacher_id": meta.get("teacher_id"),
+        "student_ids": student_ids,
+        "topic_ids": topic_ids,
+    }
+
+
+def _resolve_analytics_scope(
+    req: Optional[MasteryMatrixRequest | AtRiskStudentsRequest],
+    engine: ScienceBKT,
+) -> dict[str, Any]:
+    """Merge explicit filters with optional ``class_code`` classroom scope."""
+    class_code = (getattr(req, "class_code", None) or "").strip() if req else ""
+    if class_code:
+        scope = _resolve_class_scope(class_code, engine)
+        if not scope.get("success"):
+            return scope
+        student_ids = list(scope["student_ids"])
+        topic_ids = list(scope["topic_ids"])
+        if req and req.topic_ids:
+            allowed = set(req.topic_ids)
+            topic_ids = [t for t in topic_ids if t in allowed]
+        scope["student_ids"] = student_ids
+        scope["topic_ids"] = topic_ids
+        return scope
+
+    all_topics = sorted(engine.skill_map.keys()) if engine.skill_map else []
+    student_ids = list(req.student_ids) if req and req.student_ids else _known_learner_ids(None)
+    topic_ids = (
+        [t for t in req.topic_ids if t in engine.skill_map]
+        if req and req.topic_ids
+        else all_topics
+    )
+    return {
+        "success": True,
+        "student_ids": student_ids,
+        "topic_ids": topic_ids,
+    }
 
 
 @app.get("/health", tags=["Health"], summary="Health check")
@@ -858,7 +1193,13 @@ def health() -> dict[str, str]:
 def _startup_init() -> None:
     _init_persistence()
     _hydrate_live_state_from_db()
-    _warmup_heavy_dependencies()
+    # Warm BKT/RAG off the request thread so /health and classroom seeding
+    # are not blocked if Chroma or Postgres is slow after a --reload.
+    threading.Thread(
+        target=_warmup_heavy_dependencies,
+        name="analytics-warmup",
+        daemon=True,
+    ).start()
 
 
 def _warmup_heavy_dependencies() -> None:
@@ -1016,10 +1357,53 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
 
 
 @app.post(
+    "/api/v1/quiz/bkt-snapshot",
+    tags=["Mastery"],
+    summary="Quiz init: BKT snapshot for chapter(s) (Question Engine)",
+    response_description="Per-topic P(L) + mastery_category for all skills in the requested chapters",
+)
+def quiz_bkt_snapshot(req: QuizBktSnapshotRequest) -> dict[str, Any]:
+    """
+    **Read-only** chapter-scoped BKT snapshot for quiz initialization.
+
+    Question Engine calls this **once before the first question** with the
+    selected chapter key(s). Component 4 remains the source of truth: this
+    does **not** record an attempt or change mastery.
+
+    ``chapter_ids`` use the shared key ``G{grade}_C{chapter}`` (example: ``G6_C8``).
+    Each chapter currently maps to two canonical ``topic_id`` skills.
+
+    Unseen learner–topic pairs return the skill **prior** with ``seen: false``
+    and ``attempts: 0`` — not ``null``.
+    """
+    snapshot = _build_quiz_bkt_snapshot(str(req.user_id), list(req.chapter_ids))
+    if not snapshot["chapter_ids"]:
+        return {
+            "success": False,
+            "user_id": str(req.user_id),
+            "chapter_ids": [],
+            "unknown_chapter_ids": snapshot["unknown_chapter_ids"],
+            "topic_ids": [],
+            "topics_by_chapter": {},
+            "topic_bkt": {},
+            "mastery_category_thresholds": snapshot["mastery_category_thresholds"],
+            "error": (
+                "No valid chapter_ids. Use G{grade}_C{chapter} keys from the shared "
+                "curriculum, e.g. G6_C8."
+            ),
+        }
+    return {
+        "success": True,
+        "user_id": str(req.user_id),
+        **snapshot,
+    }
+
+
+@app.post(
     "/api/v1/assessment-submit",
     tags=["Mastery"],
     summary="Record scored quiz attempt (Question Engine)",
-    response_description="Updated P(L), Postgres assessment_attempts + bkt_mastery rows",
+    response_description="Updated P(L) for the answered topic plus topic_bkt for active chapters",
 )
 def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     """
@@ -1034,25 +1418,27 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
 
     After the BKT update, the attempt is inserted into Postgres
     ``learner_analytics.assessment_attempts`` when ``DATABASE_URL`` is set in ``.env``.
+
+    The JSON response still includes the answered topic's P(L) and category.
+    It also includes ``topic_bkt`` for the active quiz chapters so Question Engine
+    can refresh session memory. Pass ``chapter_ids`` for multi-chapter exams;
+    otherwise the map covers only the answered topic's chapter.
     """
     engine = get_shared_bkt_engine()
     label = 1 if req.is_correct else 0
     topic_id = str(req.topic_id)
-    try:
-        from curriculum_topics import normalize_topic_id
+    from curriculum_topics import chapter_id_for_topic, normalize_topic_id
 
-        topic_id = normalize_topic_id(topic_id)
-    except Exception:
-        pass
+    topic_id = normalize_topic_id(topic_id)
     response_time_s = float(req.response_time_s) if req.response_time_s is not None else None
     try:
         bkt_out = engine.predict_update(req.user_id, topic_id, label, response_time_s)
-    except ValueError as exc:
+    except ValueError as except_exc:
         return {
             "success": False,
             "user_id": req.user_id,
             "topic_id": req.topic_id,
-            "error": str(exc),
+            "error": str(except_exc),
         }
     mastery = float(engine.get_current_mastery_probability(req.user_id, topic_id))
     category_fields = _mastery_category_payload(mastery)
@@ -1083,6 +1469,22 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     )
     _persist_event("assessment_submit", attempt_record)
     postgres_result = insert_assessment_attempt(attempt_record)
+
+    active_chapters = [str(cid) for cid in (req.chapter_ids or []) if str(cid).strip()]
+    if not active_chapters:
+        inferred = chapter_id_for_topic(topic_id)
+        if inferred:
+            active_chapters = [inferred]
+    snapshot = (
+        _build_quiz_bkt_snapshot(str(req.user_id), active_chapters) if active_chapters else {
+            "chapter_ids": [],
+            "unknown_chapter_ids": [],
+            "topic_ids": [],
+            "topics_by_chapter": {},
+            "topic_bkt": {},
+        }
+    )
+
     return {
         "success": True,
         "user_id": req.user_id,
@@ -1094,6 +1496,11 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
         "risk_flag": bool(bkt_out.get("at_risk")),
         "bkt_observation_label": label,
         "label_source": "assessment",
+        "chapter_ids": snapshot["chapter_ids"],
+        "unknown_chapter_ids": snapshot["unknown_chapter_ids"],
+        "topic_ids": snapshot["topic_ids"],
+        "topics_by_chapter": snapshot["topics_by_chapter"],
+        "topic_bkt": snapshot["topic_bkt"],
         "postgres": postgres_result,
         "postgres_mastery": bkt_out.get("postgres_mastery"),
         "bkt_params_source": bkt_out.get("params_source"),
@@ -1286,24 +1693,225 @@ def _select_current_topic_for_user(
     return topics[0] if topics else None
 
 
-@app.post("/api/v1/analytics/at-risk-students", tags=["Analytics"])
-def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> dict[str, Any]:
-    """
-    Return students predicted as at-risk for intervention from live BKT + runtime signals.
+def _mean_or_none(values: list[float], *, digits: int = 4) -> Optional[float]:
+    if not values:
+        return None
+    return round(float(sum(values) / len(values)), digits)
 
-    Criteria (current topic):
-    - Low Mastery: P(L) < 0.45
-    - Negative Velocity: last 3 tutor/assessment signals strictly decrease
-    - Weak Recent Performance: recent signal average < 0.4
-    """
-    engine = get_shared_bkt_engine()
-    if not engine.skill_map:
-        engine.initialize_skills()
-    all_topics = sorted(engine.skill_map.keys())
-    topic_pool = [t for t in (req.topic_ids if req and req.topic_ids else all_topics) if t in engine.skill_map]
-    known_users = _known_learner_ids(req.student_ids if req else None)
 
-    alerts = []
+def _mastery_values_from_attempts(attempts: list[dict[str, Any]], *, limit: int = 10) -> list[float]:
+    values: list[float] = []
+    for row in attempts[-max(1, int(limit)) :]:
+        raw = row.get("updated_mastery_probability")
+        if raw is None:
+            raw = row.get("mastery_probability")
+        if isinstance(raw, (int, float)):
+            values.append(float(raw))
+    return values
+
+
+def _engagement_values_from_turns(turns: list[dict[str, Any]]) -> list[float]:
+    return [
+        float(row.get("interaction_score"))
+        for row in turns
+        if isinstance(row.get("interaction_score"), (int, float))
+    ]
+
+
+def _engagement_mastery_gap_payload(
+    engagement_average: Optional[float],
+    mastery_average: Optional[float],
+) -> dict[str, Any]:
+    """Flag learners who participate in tutoring but struggle on formal assessment."""
+    flagged = (
+        engagement_average is not None
+        and mastery_average is not None
+        and float(engagement_average) >= _ENGAGEMENT_GAP_ENGAGEMENT_MIN
+        and float(mastery_average) < _ENGAGEMENT_GAP_MASTERY_MAX
+    )
+    return {
+        "flagged": bool(flagged),
+        "engagement_average": engagement_average,
+        "mastery_average": mastery_average,
+        "thresholds": {
+            "engagement_min": _ENGAGEMENT_GAP_ENGAGEMENT_MIN,
+            "mastery_max": _ENGAGEMENT_GAP_MASTERY_MAX,
+        },
+    }
+
+
+def _build_diagnostic_skills(bkt_parameters: list[dict[str, Any]]) -> dict[str, Any]:
+    """Skills this learner has evidence on where the BKT model is high-slip or high-guess."""
+    high_slip: list[dict[str, Any]] = []
+    high_guess: list[dict[str, Any]] = []
+    for row in bkt_parameters:
+        topic_id = str(row.get("topic_id") or "")
+        if not topic_id:
+            continue
+        p_s = float(row.get("p_s") or 0.0)
+        p_g = float(row.get("p_g") or 0.0)
+        item = {
+            "topic_id": topic_id,
+            "p_l": row.get("p_l"),
+            "mastery_category": row.get("mastery_category"),
+            "p_s": round(p_s, 4),
+            "p_g": round(p_g, 4),
+        }
+        if p_s > _SLIP_HIGH_THRESHOLD:
+            high_slip.append({**item, "flag": "high_slip"})
+        if p_g > _GUESS_HIGH_THRESHOLD:
+            high_guess.append({**item, "flag": "high_guess"})
+    high_slip.sort(key=lambda x: float(x.get("p_s") or 0.0), reverse=True)
+    high_guess.sort(key=lambda x: float(x.get("p_g") or 0.0), reverse=True)
+    flagged_ids = {str(r["topic_id"]) for r in high_slip} | {str(r["topic_id"]) for r in high_guess}
+    return {
+        "high_slip": high_slip,
+        "high_guess": high_guess,
+        "count": len(flagged_ids),
+        "thresholds": {
+            "p_s": _SLIP_HIGH_THRESHOLD,
+            "p_g": _GUESS_HIGH_THRESHOLD,
+        },
+        "interpretation": {
+            "high_slip": (
+                "Incorrect answers on these skills may be slips (the model is noisy) "
+                "rather than lack of knowledge."
+            ),
+            "high_guess": (
+                "Correct answers on these skills may include lucky guesses; "
+                "treat a high P(L) with caution."
+            ),
+        },
+    }
+
+
+def _privacy_safe_recent_attempts(
+    attempts: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Table-ready attempt rows for teachers — no free-text explanations."""
+    rows: list[dict[str, Any]] = []
+    for row in attempts[-max(1, int(limit)) :]:
+        rows.append(
+            {
+                "topic_id": str(row.get("topic_id") or ""),
+                "is_correct": bool(row.get("is_correct")),
+                "response_time_s": row.get("response_time_s"),
+                "mastery_probability": row.get("updated_mastery_probability", row.get("mastery_probability")),
+                "distractor_label": row.get("distractor_label"),
+                "question_type": row.get("question_type"),
+                "error_category": row.get("error_category"),
+                "timestamp": row.get("timestamp"),
+            }
+        )
+    return rows
+
+
+def _distractor_counts_from_attempts(attempts: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for attempt in attempts:
+        cloud_label = _misconception_cloud_label(attempt)
+        if cloud_label:
+            counts[cloud_label] += 1
+    return dict(counts)
+
+
+def _mastery_band_counts_from_matrix(
+    matrix: dict[str, dict[str, float]],
+    student_ids: list[str],
+    topic_ids: list[str],
+) -> dict[str, Any]:
+    mastered = 0
+    learning = 0
+    at_risk = 0
+    for sid in student_ids:
+        row = matrix.get(sid) or {}
+        for tid in topic_ids:
+            value = row.get(tid)
+            if not isinstance(value, (int, float)):
+                continue
+            category = _mastery_category_from_pl(float(value))
+            if category == "advanced":
+                mastered += 1
+            elif category == "intermediate":
+                learning += 1
+            else:
+                at_risk += 1
+    return {
+        "mastered": mastered,
+        "learning": learning,
+        "at_risk": at_risk,
+        "total": len(student_ids) * len(topic_ids),
+        "thresholds": {
+            "mastered": f"P(L) >= {_MASTERY_ADVANCED_MIN:.2f}",
+            "learning": f"{_MASTERY_BASIC_MAX:.2f} <= P(L) < {_MASTERY_ADVANCED_MIN:.2f}",
+            "at_risk": f"P(L) < {_MASTERY_BASIC_MAX:.2f}",
+        },
+    }
+
+
+def _hardest_skills_from_matrix(
+    matrix: dict[str, dict[str, float]],
+    student_ids: list[str],
+    topic_ids: list[str],
+    *,
+    top_n: int = 5,
+) -> list[dict[str, Any]]:
+    roster_n = len(student_ids)
+    ranked: list[dict[str, Any]] = []
+    for tid in topic_ids:
+        values: list[float] = []
+        at_risk_count = 0
+        for sid in student_ids:
+            value = (matrix.get(sid) or {}).get(tid)
+            if not isinstance(value, (int, float)):
+                continue
+            values.append(float(value))
+            if float(value) < _MASTERY_BASIC_MAX:
+                at_risk_count += 1
+        if not values:
+            continue
+        ranked.append(
+            {
+                "topic_id": tid,
+                "avg_mastery": round(float(sum(values) / len(values)), 4),
+                "at_risk_count": at_risk_count,
+                "at_risk_share": round(at_risk_count / roster_n, 4) if roster_n else 0.0,
+            }
+        )
+    ranked.sort(key=lambda row: (-float(row["at_risk_share"]), float(row["avg_mastery"])))
+    return ranked[: max(1, int(top_n))]
+
+
+def _top_at_risk_skills(alerts: list[dict[str, Any]], *, top_n: int = 5) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, float]] = defaultdict(lambda: {"alert_count": 0, "risk_sum": 0.0})
+    for alert in alerts:
+        topic_id = str(alert.get("topic_id") or "")
+        if not topic_id:
+            continue
+        buckets[topic_id]["alert_count"] += 1
+        buckets[topic_id]["risk_sum"] += float(alert.get("risk_score") or 0)
+    ranked = [
+        {
+            "topic_id": topic_id,
+            "alert_count": int(stats["alert_count"]),
+            "avg_risk_score": round(float(stats["risk_sum"]) / float(stats["alert_count"]), 2),
+        }
+        for topic_id, stats in buckets.items()
+    ]
+    ranked.sort(key=lambda row: (-int(row["alert_count"]), -float(row["avg_risk_score"])))
+    return ranked[: max(1, int(top_n))]
+
+
+def _scan_current_topic_at_risk_alerts(
+    known_users: list[str],
+    topic_pool: list[str],
+    engine: ScienceBKT,
+) -> list[dict[str, Any]]:
+    """Same 2-of-3 current-topic scan used by the classroom at-risk feed."""
+    alerts: list[dict[str, Any]] = []
+    _rebuild_signals_for_learners(known_users)
     for uid in known_users:
         engine.prefetch_learner_states(uid)
         current_topic = _select_current_topic_for_user(uid, topic_pool, engine)
@@ -1330,13 +1938,46 @@ def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> d
             alerts.append(alert)
 
     alerts.sort(key=lambda a: a["risk_score"], reverse=True)
-    return {
+    return alerts
+
+
+@app.post("/api/v1/analytics/at-risk-students", tags=["Analytics"])
+def analytics_at_risk_students(req: Optional[AtRiskStudentsRequest] = None) -> dict[str, Any]:
+    """
+    Return students predicted as at-risk for intervention from live BKT + runtime signals.
+
+    Criteria (current topic):
+    - Low Mastery: P(L) < 0.45
+    - Negative Velocity: last 3 tutor/assessment signals strictly decrease
+    - Weak Recent Performance: recent signal average < 0.4
+
+    When ``class_code`` is provided, only learners enrolled in that class are scanned and
+    topics are limited to the class grade (``shared.topics`` or ``G{n}_*`` fallback).
+    """
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    scope = _resolve_analytics_scope(req, engine)
+    if not scope.get("success"):
+        return {"success": False, "error": scope.get("error", "Invalid analytics scope.")}
+
+    topic_pool = [t for t in scope["topic_ids"] if t in engine.skill_map]
+    known_users = _known_learner_ids(scope["student_ids"])
+
+    alerts = _scan_current_topic_at_risk_alerts(known_users, topic_pool, engine)
+    payload: dict[str, Any] = {
         "success": True,
         "mode": "live_state",
         "criteria": _risk_criteria_payload(),
         "count": len(alerts),
         "students": alerts,
+        "student_ids": scope["student_ids"],
+        "topic_ids": topic_pool,
     }
+    for key in ("class_code", "class_name", "grade_level", "subject", "teacher_id"):
+        if key in scope:
+            payload[key] = scope[key]
+    return payload
 
 
 @app.get(
@@ -1384,19 +2025,36 @@ def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     Return mastery probabilities for a classroom slice (students × topics).
 
     Uses live BKT state (in-memory + Postgres ``bkt_mastery``). Unseen pairs show skill priors.
+
+    When ``class_code`` is provided, roster and grade-scoped topics are loaded from the
+    shared schema (``shared.classes``, ``shared.class_enrollments``, ``shared.topics``).
     """
-    matrix = _compute_mastery_from_live_state(req.student_ids, req.topic_ids)
-    shared = get_shared_bkt_engine()
-    known_topics = set(shared.skill_map.keys()) if shared.skill_map else set()
-    unknown_topic_ids = [t for t in req.topic_ids if t not in known_topics]
-    return {
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    scope = _resolve_analytics_scope(req, engine)
+    if not scope.get("success"):
+        return {"success": False, "error": scope.get("error", "Invalid analytics scope.")}
+
+    student_ids = list(scope["student_ids"])
+    topic_ids = list(scope["topic_ids"])
+    matrix = _compute_mastery_from_live_state(student_ids, topic_ids)
+    known_topics = set(engine.skill_map.keys()) if engine.skill_map else set()
+    unknown_topic_ids = [t for t in topic_ids if t not in known_topics]
+    payload: dict[str, Any] = {
         "success": True,
         "mode": "live_state",
-        "student_ids": req.student_ids,
-        "topic_ids": req.topic_ids,
+        "student_ids": student_ids,
+        "topic_ids": topic_ids,
         "unknown_topic_ids": unknown_topic_ids,
         "mastery_matrix": matrix,
+        "roster_count": len(student_ids),
+        "topic_count": len(topic_ids),
     }
+    for key in ("class_code", "class_name", "grade_level", "subject", "teacher_id"):
+        if key in scope:
+            payload[key] = scope[key]
+    return payload
 
 
 @app.get(
@@ -1404,13 +2062,32 @@ def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     tags=["Analytics"],
     summary="Deep-dive learner profile (teacher or student)",
 )
-def analytics_student_profile(user_id: str) -> dict[str, Any]:
+def analytics_student_profile(
+    user_id: str,
+    class_code: Optional[str] = Query(
+        None,
+        description=(
+            "When provided, returns 403-style error payload if the learner is not "
+            "enrolled in this class (teacher dashboard scoping)."
+        ),
+    ),
+) -> dict[str, Any]:
     """
     Deep-dive profile for one learner from live BKT state, Postgres, and runtime events.
 
     Also embeds ``focus_areas`` (same payload as
     ``GET /api/v1/analytics/student-focus-areas/{user_id}``) for one-call profile pages.
+
+    Optional ``class_code`` restricts access to learners on that classroom roster.
     """
+    code = (class_code or "").strip().upper()
+    if code and not learner_in_class(str(user_id), code):
+        return {
+            "success": False,
+            "user_id": str(user_id),
+            "class_code": code,
+            "error": f"Learner {user_id} is not enrolled in class {code}.",
+        }
     engine = get_shared_bkt_engine()
     if not engine.skill_map:
         engine.initialize_skills()
@@ -1529,6 +2206,18 @@ def analytics_student_profile(user_id: str) -> dict[str, Any]:
     ]
     focus_areas, focus_meta = _build_student_focus_areas(str(user_id))
     topics_covered = len({str(r.get("topic_id")) for r in live_attempts if r.get("topic_id")})
+    engagement_average = (
+        round(float(sum(engagement_scores) / len(engagement_scores)), 4)
+        if engagement_scores
+        else None
+    )
+    mastery_last_10 = _mastery_values_from_attempts(live_attempts, limit=10)
+    diagnostic_skills = _build_diagnostic_skills(bkt_parameters)
+    recent_attempts = _privacy_safe_recent_attempts(live_attempts, limit=10)
+    engagement_mastery_gap = _engagement_mastery_gap_payload(
+        engagement_average,
+        _mean_or_none(mastery_last_10),
+    )
     return {
         "success": True,
         "mode": "live_state",
@@ -1548,12 +2237,11 @@ def analytics_student_profile(user_id: str) -> dict[str, Any]:
             "time_on_task_trends": topic_time_trends,
         },
         "mastery_timeline_last_10_attempts": timeline_tail,
+        "recent_attempts": recent_attempts,
+        "diagnostic_skills": diagnostic_skills,
+        "engagement_mastery_gap": engagement_mastery_gap,
         "engagement_timeline_last_10_turns": engagement_tail,
-        "engagement_average_last_10": (
-            round(float(sum(engagement_scores) / len(engagement_scores)), 4)
-            if engagement_scores
-            else None
-        ),
+        "engagement_average_last_10": engagement_average,
         "chat_history_last_5": chat_tail,
         "critical_confusion_turns": critical_confusion_turns,
         "meta": {
@@ -1566,6 +2254,256 @@ def analytics_student_profile(user_id: str) -> dict[str, Any]:
             "overall_mastery_tail": [round(v, 4) for v in mastery_all[-10:]],
             "focus_areas_topics_scanned": focus_meta.get("topics_scanned", 0),
             "focus_areas_endpoint": f"/api/v1/analytics/student-focus-areas/{user_id}",
+            "diagnostic_skills_count": diagnostic_skills.get("count", 0),
+            "recent_attempts_count": len(recent_attempts),
+            "engagement_mastery_gap_flagged": bool(engagement_mastery_gap.get("flagged")),
         },
+    }
+
+
+def _build_class_summary_payload(
+    *,
+    scope: dict[str, Any],
+    engine: ScienceBKT,
+    matrix: Optional[dict[str, dict[str, Any]]] = None,
+    alerts: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Aggregate classroom research metrics from existing live-state helpers."""
+    student_ids = list(scope.get("student_ids") or [])
+    topic_ids = [t for t in (scope.get("topic_ids") or []) if t in engine.skill_map]
+    if matrix is None:
+        matrix = _compute_mastery_from_live_state(student_ids, topic_ids)
+    known_users = _known_learner_ids(student_ids)
+    if alerts is None:
+        alerts = _scan_current_topic_at_risk_alerts(known_users, topic_ids, engine)
+
+    attempts_by_user = (
+        fetch_assessment_attempts_for_learners(student_ids, limit_per_learner=200)
+        if postgres_configured()
+        else {}
+    )
+    turns_by_user = (
+        fetch_tutor_turns_for_learners(student_ids, limit_per_learner=10)
+        if postgres_configured()
+        else {}
+    )
+    frustration_by_user = (
+        fetch_frustration_scores_for_learners(student_ids)
+        if postgres_configured()
+        else {}
+    )
+
+    gap_learners: list[dict[str, Any]] = []
+    distractor_counts: dict[str, int] = defaultdict(int)
+    distractor_learners: dict[str, set[str]] = defaultdict(set)
+    frustration_all: list[float] = []
+    elevated_frustration: list[str] = []
+    learners_with_attempts = 0
+
+    for uid in student_ids:
+        attempts = attempts_by_user.get(uid) or _live_attempts_for_user(uid)
+        if attempts:
+            learners_with_attempts += 1
+        for tag, count in _distractor_counts_from_attempts(attempts).items():
+            distractor_counts[tag] += int(count)
+            distractor_learners[tag].add(uid)
+
+        turns = turns_by_user.get(uid) or _load_tutor_turns_for_user(uid, limit=10)
+        engagement_avg = _mean_or_none(_engagement_values_from_turns(turns))
+        mastery_avg = _mean_or_none(_mastery_values_from_attempts(attempts, limit=10))
+        gap = _engagement_mastery_gap_payload(engagement_avg, mastery_avg)
+        if gap["flagged"]:
+            gap_learners.append(
+                {
+                    "student_id": uid,
+                    "engagement_average": engagement_avg,
+                    "mastery_average": mastery_avg,
+                }
+            )
+
+        f_vals = frustration_by_user.get(uid) or _load_frustration_values_for_user(uid)
+        if f_vals:
+            frustration_all.extend(f_vals)
+            learner_avg = float(sum(f_vals) / len(f_vals))
+            if learner_avg > _FRUSTRATION_ELEVATED_THRESHOLD:
+                elevated_frustration.append(uid)
+
+    top_distractors = sorted(
+        [
+            {
+                "tag": tag,
+                "count": int(count),
+                "learner_count": len(distractor_learners[tag]),
+            }
+            for tag, count in distractor_counts.items()
+        ],
+        key=lambda row: int(row["count"]),
+        reverse=True,
+    )[:5]
+
+    payload: dict[str, Any] = {
+        "success": True,
+        "mode": "live_state",
+        "roster_count": len(student_ids),
+        "topic_count": len(topic_ids),
+        "student_ids": student_ids,
+        "topic_ids": topic_ids,
+        "mastery_bands": _mastery_band_counts_from_matrix(matrix, student_ids, topic_ids),
+        "hardest_skills": _hardest_skills_from_matrix(matrix, student_ids, topic_ids, top_n=5),
+        "at_risk_feed": {
+            "count": len(alerts),
+            "top_skills": _top_at_risk_skills(alerts, top_n=5),
+        },
+        "top_distractors": top_distractors,
+        "engagement_mastery_gap": {
+            "count": len(gap_learners),
+            "learners": gap_learners,
+            "thresholds": {
+                "engagement_min": _ENGAGEMENT_GAP_ENGAGEMENT_MIN,
+                "mastery_max": _ENGAGEMENT_GAP_MASTERY_MAX,
+            },
+            "note": (
+                "Learners with high Socratic dialogue engagement "
+                f"(>= {_ENGAGEMENT_GAP_ENGAGEMENT_MIN:.0%}) but low recent "
+                f"assessment mastery (< {_ENGAGEMENT_GAP_MASTERY_MAX:.0%})."
+            ),
+        },
+        "frustration": {
+            "class_average": _mean_or_none(frustration_all),
+            "samples": len(frustration_all),
+            "elevated_count": len(elevated_frustration),
+            "elevated_learner_ids": elevated_frustration,
+            "threshold": _FRUSTRATION_ELEVATED_THRESHOLD,
+        },
+        "meta": {
+            "learners_with_attempts": learners_with_attempts,
+            "known_learners_scanned_for_risk": len(known_users),
+            "criteria": _risk_criteria_payload(),
+            "batch_postgres": bool(postgres_configured()),
+        },
+    }
+    for key in ("class_code", "class_name", "grade_level", "subject", "teacher_id"):
+        if key in scope:
+            payload[key] = scope[key]
+    return payload
+
+
+def _build_classroom_dashboard_payload(
+    *,
+    scope: dict[str, Any],
+    engine: ScienceBKT,
+) -> dict[str, Any]:
+    """One-pass matrix + at-risk + class-summary for the educator dashboard."""
+    student_ids = list(scope.get("student_ids") or [])
+    topic_ids = [t for t in (scope.get("topic_ids") or []) if t in engine.skill_map]
+    known_topics = set(engine.skill_map.keys()) if engine.skill_map else set()
+    unknown_topic_ids = [t for t in topic_ids if t not in known_topics]
+
+    matrix = _compute_mastery_from_live_state(student_ids, topic_ids)
+    known_users = _known_learner_ids(student_ids)
+    alerts = _scan_current_topic_at_risk_alerts(known_users, topic_ids, engine)
+    summary = _build_class_summary_payload(
+        scope=scope,
+        engine=engine,
+        matrix=matrix,
+        alerts=alerts,
+    )
+
+    payload: dict[str, Any] = {
+        "success": True,
+        "mode": "live_state",
+        "student_ids": student_ids,
+        "topic_ids": topic_ids,
+        "unknown_topic_ids": unknown_topic_ids,
+        "roster_count": len(student_ids),
+        "topic_count": len(topic_ids),
+        "mastery_matrix": matrix,
+        "at_risk_students": alerts,
+        "at_risk_count": len(alerts),
+        "criteria": _risk_criteria_payload(),
+        "class_summary": summary,
+        "meta": {
+            "optimized": True,
+            "note": (
+                "Single-pass classroom dashboard: matrix, at-risk, and summary "
+                "share one roster resolve, one signal rebuild, and batched Postgres reads."
+            ),
+        },
+    }
+    for key in ("class_code", "class_name", "grade_level", "subject", "teacher_id"):
+        if key in scope:
+            payload[key] = scope[key]
+    return payload
+
+
+@app.get(
+    "/api/v1/analytics/class-summary",
+    tags=["Analytics"],
+    summary="Classroom research summary (bands, gap, distractors, frustration)",
+)
+def analytics_class_summary(
+    class_code: str = Query(
+        ...,
+        description="Classroom code from shared.classes (e.g. SCI-G7-492).",
+        examples=["SCI-G7-492"],
+    ),
+) -> dict[str, Any]:
+    """
+    One-call classroom aggregates for the educator dashboard and evaluation metrics.
+
+    Prefer ``GET /api/v1/analytics/classroom-dashboard`` when the UI also needs the
+    mastery matrix and at-risk feed (avoids recomputing those twice).
+    """
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    scope = _resolve_class_scope(class_code, engine)
+    if not scope.get("success"):
+        return {"success": False, "error": scope.get("error", "Invalid class_code.")}
+    return _build_class_summary_payload(scope=scope, engine=engine)
+
+
+@app.get(
+    "/api/v1/analytics/classroom-dashboard",
+    tags=["Analytics"],
+    summary="Teacher dashboard bundle (matrix + at-risk + class-summary)",
+)
+def analytics_classroom_dashboard(
+    class_code: str = Query(
+        ...,
+        description="Classroom code from shared.classes (e.g. SCI-G8-UKGE7X).",
+        examples=["SCI-G8-UKGE7X"],
+    ),
+) -> dict[str, Any]:
+    """
+    Optimized Classroom Insights payload: mastery matrix, current-topic at-risk
+    alerts, and research summary in **one** request / one compute pass.
+    """
+    engine = get_shared_bkt_engine()
+    if not engine.skill_map:
+        engine.initialize_skills()
+    scope = _resolve_class_scope(class_code, engine)
+    if not scope.get("success"):
+        return {"success": False, "error": scope.get("error", "Invalid class_code.")}
+    return _build_classroom_dashboard_payload(scope=scope, engine=engine)
+
+
+@app.post(
+    "/api/v1/dev/reset-learner-runtime",
+    tags=["Analytics"],
+    summary="Clear in-memory BKT state for a classroom seed (dev)",
+)
+def reset_learner_runtime(req: ResetLearnerRuntimeRequest) -> dict[str, Any]:
+    """Used by ``seed_g8_class_dashboard.py --reset`` so re-seeded quizzes start at the prior."""
+    if str(req.confirm).strip() != "seed_g8_class_dashboard":
+        return {"success": False, "error": "confirm token does not match."}
+    ids = [str(uid).strip() for uid in req.learner_ids if str(uid).strip()]
+    engine = get_shared_bkt_engine()
+    dropped = engine.clear_runtime_state_for_learners(ids)
+    _clear_runtime_buffers_for_learners(ids)
+    return {
+        "success": True,
+        "learner_ids": ids,
+        "dropped_mastery_rows": dropped,
     }
 

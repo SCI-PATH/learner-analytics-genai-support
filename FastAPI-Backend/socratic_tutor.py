@@ -45,7 +45,7 @@ from langchain_groq import ChatGroq
 
 from bkt_engine import ScienceBKT
 from curriculum_topics import FALLBACK_TOPIC_ID, normalize_topic_id
-from knowledge_base import _TOPIC_KEYWORDS, _TOPIC_QUERY_BOOST, retrieve_context
+from knowledge_base import _TOPIC_KEYWORDS, retrieve_context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = PROJECT_ROOT / ".env"
@@ -324,6 +324,10 @@ _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
         "reproduce", "reproduction", "respond", "sensitive",
     ],
     "G7_C1_PLA_CLASSIF": ["monocot", "dicot", "monocots", "dicots"],
+    "G7_C12_BIO_SYSTEMS": [
+        "stomach", "digestive", "digestion", "digestive system",
+        "intestine", "gut",
+    ],
     "G8_C11_PHO_PROCESS": ["photosynthesis", "chlorophyll", "glucose"],
     "G9_C14_WAV_REFRACT": ["refraction", "refract", "critical angle"],
     "G7_C11_SOU_PROPAG": ["sound wave", "frequency", "amplitude", "pitch"],
@@ -1159,28 +1163,44 @@ def _socratic_discounted_bkt_label(interaction_score: float) -> int:
     return 1 if discounted >= 0.25 else 0
 
 
+def _whole_word_count(text: str, keyword: str) -> int:
+    """Count whole-word / whole-phrase hits so short tokens like ``ac`` cannot match inside ``stomach``."""
+    kw = keyword.lower().strip()
+    if not kw:
+        return 0
+    pattern = r"(?<!\w)" + re.escape(kw) + r"(?!\w)"
+    return len(re.findall(pattern, text))
+
+
 def _score_text_for_topic(text: str, topic_id: str) -> int:
-    """Keyword + boost phrase scoring for one topic against normalized student text."""
+    """Keyword + alias scoring for one topic against normalized student text.
+
+    Short curriculum tokens (``ac``, ``dc``, ``ph``) must match as whole words.
+    Retrieval boost blurbs are not scored here — they are chapter descriptions,
+    not student language.
+    """
     low = text.lower()
     words = set(re.sub(r"[^\w\s]", " ", low).split())
     score = 0
     keywords = list(_TOPIC_KEYWORDS.get(topic_id, []))
     keywords.extend(_STUDENT_TOPIC_ALIASES.get(topic_id, []))
-    boost = _TOPIC_QUERY_BOOST.get(topic_id, "")
-    if boost:
-        keywords.append(boost.lower())
 
     for kw in keywords:
         kw_low = kw.lower().strip()
         if not kw_low:
             continue
-        if kw_low in low:
-            score += low.count(kw_low) + 2
+        hits = _whole_word_count(low, kw_low)
+        if hits:
+            score += hits + 2
             continue
+        # Fuzzy stem only for longer tokens (avoids what/heat/cell-style 4-letter collisions).
+        if len(kw_low) < 5:
+            continue
+        kw_prefix = kw_low[:5]
         for w in words:
-            if len(w) < 4 or len(kw_low) < 4:
+            if len(w) < 5:
                 continue
-            if w.startswith(kw_low[:4]) or kw_low.startswith(w[:4]):
+            if w.startswith(kw_prefix) or kw_low.startswith(w[:5]):
                 score += 1
                 break
     return score

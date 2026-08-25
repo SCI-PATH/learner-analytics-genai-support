@@ -445,6 +445,16 @@ class ScienceBKT:
         else:
             self.skill_params[skill_name] = self._extract_skill_params(skill_name, skill_df)
 
+    def drop_cached_skill_params(self, skill_ids: list[str]) -> int:
+        """Drop in-memory BKT params so the next read reloads from Postgres."""
+        removed = 0
+        for skill_id in skill_ids:
+            key = str(skill_id).strip()
+            if key and key in self.skill_params:
+                del self.skill_params[key]
+                removed += 1
+        return removed
+
     def clear_runtime_state_for_learners(self, user_ids: list[str]) -> int:
         """Drop in-memory mastery so the next update reloads from Postgres (or prior)."""
         ids = {str(uid) for uid in user_ids if str(uid).strip()}

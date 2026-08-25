@@ -805,18 +805,23 @@ def _record_assessment_attempt(payload: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+_ERROR_CATEGORY_TAGS = {"NEAR_MISS", "MISCONCEPTION", "COMPLETE_MISS"}
+
+
 def _misconception_cloud_label(attempt: dict[str, Any]) -> Optional[str]:
+    """Phrase for the misconception cloud — never the error-category tag itself.
+
+    NEAR_MISS / COMPLETE_MISS / MISCONCEPTION describe *how* the miss happened.
+    Teachers need the actual wrong idea (e.g. "Current is used up in the bulb").
+    """
     if bool(attempt.get("is_correct")):
         return None
     label = str(attempt.get("distractor_label") or "").strip()
-    if label:
+    if label and label.upper().replace(" ", "_") not in _ERROR_CATEGORY_TAGS:
         return label
     chosen = str(attempt.get("chosen_distractor_text") or "").strip()
     if chosen:
         return chosen[:80] + ("..." if len(chosen) > 80 else "")
-    tag = str(attempt.get("distractor_tag") or "").strip()
-    if tag:
-        return tag.replace("_", " ").title()
     return None
 
 
@@ -1095,13 +1100,23 @@ class AtRiskStudentsRequest(BaseModel):
     topic_ids: Optional[list[str]] = Field(None, description="Restrict scan to these topics")
 
 
+_SEED_RUNTIME_TOKENS = {
+    "seed_g8_class_dashboard",
+    "seed_g8_student_deepdive",
+}
+
+
 class ResetLearnerRuntimeRequest(BaseModel):
     """Clear in-memory BKT / signal buffers so a classroom seed can start from priors."""
 
     learner_ids: list[str] = Field(..., min_length=1)
     confirm: str = Field(
         ...,
-        description="Must match the seed source token (seed_g8_class_dashboard).",
+        description="Must match a seed source token (seed_g8_class_dashboard or seed_g8_student_deepdive).",
+    )
+    skill_ids: Optional[list[str]] = Field(
+        None,
+        description="Optional topic IDs whose cached BKT params should reload from Postgres.",
     )
 
 
@@ -2494,16 +2509,20 @@ def analytics_classroom_dashboard(
     summary="Clear in-memory BKT state for a classroom seed (dev)",
 )
 def reset_learner_runtime(req: ResetLearnerRuntimeRequest) -> dict[str, Any]:
-    """Used by ``seed_g8_class_dashboard.py --reset`` so re-seeded quizzes start at the prior."""
-    if str(req.confirm).strip() != "seed_g8_class_dashboard":
+    """Used by classroom seed scripts so re-seeded quizzes start at the prior."""
+    token = str(req.confirm).strip()
+    if token not in _SEED_RUNTIME_TOKENS:
         return {"success": False, "error": "confirm token does not match."}
     ids = [str(uid).strip() for uid in req.learner_ids if str(uid).strip()]
     engine = get_shared_bkt_engine()
     dropped = engine.clear_runtime_state_for_learners(ids)
     _clear_runtime_buffers_for_learners(ids)
+    skill_ids = [str(tid).strip() for tid in (req.skill_ids or []) if str(tid).strip()]
+    dropped_params = engine.drop_cached_skill_params(skill_ids) if skill_ids else 0
     return {
         "success": True,
         "learner_ids": ids,
         "dropped_mastery_rows": dropped,
+        "dropped_skill_param_cache": dropped_params,
     }
 

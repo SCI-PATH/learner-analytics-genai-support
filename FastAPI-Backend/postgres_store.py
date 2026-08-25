@@ -582,13 +582,19 @@ def delete_seed_dashboard_analytics(
     *,
     source: str,
     learner_ids: list[str],
+    topic_ids: Optional[list[str]] = None,
 ) -> dict[str, int]:
-    """Remove demo quiz / cue / tutor / mastery rows for a classroom seed."""
+    """Remove demo quiz / cue / tutor / mastery rows for a classroom seed.
+
+    When ``topic_ids`` is set, ``bkt_mastery`` is deleted only for those skills so
+    unrelated tutor-derived mastery (other grades) is left intact.
+    """
     if not postgres_configured() or psycopg is None:
         return {"ok": 0, "error": 1}
     ids = [str(uid) for uid in learner_ids if str(uid).strip()]
     if not ids:
         return {}
+    topics = [str(tid) for tid in (topic_ids or []) if str(tid).strip()]
     counts: dict[str, int] = {}
     try:
         with _connect() as conn:
@@ -617,13 +623,22 @@ def delete_seed_dashboard_analytics(
                     (source, ids),
                 )
                 counts["tutor_turns"] = int(cur.rowcount or 0)
-                cur.execute(
-                    f"""
-                    DELETE FROM {BKT_MASTERY_TABLE}
-                    WHERE learner_id = ANY(%s)
-                    """,
-                    (ids,),
-                )
+                if topics:
+                    cur.execute(
+                        f"""
+                        DELETE FROM {BKT_MASTERY_TABLE}
+                        WHERE learner_id = ANY(%s) AND topic_id = ANY(%s)
+                        """,
+                        (ids, topics),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        DELETE FROM {BKT_MASTERY_TABLE}
+                        WHERE learner_id = ANY(%s)
+                        """,
+                        (ids,),
+                    )
                 counts["bkt_mastery"] = int(cur.rowcount or 0)
             conn.commit()
     except Exception:

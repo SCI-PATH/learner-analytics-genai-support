@@ -68,6 +68,38 @@ class TopicRoutingTests(unittest.TestCase):
         self.assertEqual(topic, "G8_C11_PHO_PROCESS")
         self.assertEqual(routing, "inferred")
 
+    def test_stomach_does_not_match_ac_substring(self) -> None:
+        self.assertEqual(
+            socratic_tutor.infer_topic_id_from_question("what is a stomach"),
+            "G7_C12_BIO_SYSTEMS",
+        )
+        self.assertEqual(
+            socratic_tutor._score_text_for_topic(
+                "what is a stomach", "G7_C3_ELE_CURRENTS"
+            ),
+            0,
+        )
+
+    def test_ac_as_whole_word_still_routes_to_currents(self) -> None:
+        self.assertEqual(
+            socratic_tutor.infer_topic_id_from_question("What is AC?"),
+            "G7_C3_ELE_CURRENTS",
+        )
+
+    def test_stomach_switches_away_from_electric_currents(self) -> None:
+        socratic_tutor._last_resolved_topic_by_user[self.user_id] = (
+            "G7_C3_ELE_CURRENTS"
+        )
+        topic, routing = socratic_tutor._resolve_topic_for_turn(
+            self.user_id,
+            "what is a stomach",
+            None,
+            [{"role": "assistant", "content": "Which source powers a flashlight?"}],
+        )
+
+        self.assertEqual(topic, "G7_C12_BIO_SYSTEMS")
+        self.assertEqual(routing, "switched")
+
 
 if __name__ == "__main__":
     unittest.main()

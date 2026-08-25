@@ -25,6 +25,7 @@ import streamlit as st
 
 
 DEFAULT_API_BASE = "http://127.0.0.1:8003"
+DEFAULT_USER_MGMT_API = "http://127.0.0.1:8001"
 DEFAULT_API_TIMEOUT_S = 60.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SKILL_HIERARCHY_CANDIDATES = [
@@ -100,17 +101,54 @@ DEFAULT_TOPICS: list[str] = list(_load_skill_hierarchy()[0])
 TOPIC_LABELS: dict[str, str] = dict(_load_skill_hierarchy()[1])
 
 
+def login_teacher(
+    user_mgmt_base: str,
+    email: str,
+    password: str,
+    timeout_s: float = DEFAULT_API_TIMEOUT_S,
+) -> dict[str, Any]:
+    url = f"{user_mgmt_base.rstrip('/')}/auth/login"
+    resp = requests.post(
+        url,
+        json={"email": email.strip(), "password": password},
+        timeout=timeout_s,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_teacher_classes(
+    user_mgmt_base: str,
+    access_token: str,
+    timeout_s: float = DEFAULT_API_TIMEOUT_S,
+) -> list[dict[str, Any]]:
+    url = f"{user_mgmt_base.rstrip('/')}/classes/mine"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=timeout_s,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return list(data) if isinstance(data, list) else []
+
+
 def fetch_mastery_matrix(
     api_base: str,
-    student_ids: list[str],
-    topic_ids: list[str],
+    *,
+    class_code: str | None = None,
+    student_ids: list[str] | None = None,
+    topic_ids: list[str] | None = None,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/mastery/matrix"
-    payload = {
-        "student_ids": student_ids,
-        "topic_ids": topic_ids,
-    }
+    if class_code:
+        payload: dict[str, Any] = {"class_code": class_code.strip().upper()}
+    else:
+        payload = {
+            "student_ids": student_ids or [],
+            "topic_ids": topic_ids or [],
+        }
     resp = requests.post(url, json=payload, timeout=timeout_s)
     resp.raise_for_status()
     return resp.json()
@@ -118,15 +156,20 @@ def fetch_mastery_matrix(
 
 def fetch_at_risk_students(
     api_base: str,
-    student_ids: list[str],
-    topic_ids: list[str],
+    *,
+    class_code: str | None = None,
+    student_ids: list[str] | None = None,
+    topic_ids: list[str] | None = None,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/analytics/at-risk-students"
-    payload = {
-        "student_ids": student_ids,
-        "topic_ids": topic_ids,
-    }
+    if class_code:
+        payload: dict[str, Any] = {"class_code": class_code.strip().upper()}
+    else:
+        payload = {
+            "student_ids": student_ids,
+            "topic_ids": topic_ids,
+        }
     resp = requests.post(url, json=payload, timeout=timeout_s)
     resp.raise_for_status()
     return resp.json()
@@ -135,10 +178,13 @@ def fetch_at_risk_students(
 def fetch_student_profile(
     api_base: str,
     user_id: str,
+    *,
+    class_code: str | None = None,
     timeout_s: float = DEFAULT_API_TIMEOUT_S,
 ) -> dict[str, Any]:
     url = f"{api_base.rstrip('/')}/api/v1/analytics/student-profile/{user_id}"
-    resp = requests.get(url, timeout=timeout_s)
+    params = {"class_code": class_code.strip().upper()} if class_code else None
+    resp = requests.get(url, params=params, timeout=timeout_s)
     resp.raise_for_status()
     return resp.json()
 
@@ -348,6 +394,14 @@ def parse_lines(text: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+def _class_label(class_row: dict[str, Any]) -> str:
+    name = str(class_row.get("class_name") or "Class")
+    code = str(class_row.get("class_code") or "")
+    grade = class_row.get("grade_level")
+    grade_txt = f"Grade {grade}" if grade is not None else "Grade ?"
+    return f"{name} ({grade_txt}) · {code}"
+
+
 def main() -> None:
     st.set_page_config(page_title="Educator Insight Dashboard", layout="wide")
     st.markdown(
@@ -478,13 +532,21 @@ div[data-testid="stDataFrame"] table {
     )
     st.markdown('<div class="main-title">📘 Educator Insight Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="subtitle">High-density G6–G9 mastery matrix (57 topics), at-risk alerts, and conversational engagement.</div>',
+        '<div class="subtitle">Class-scoped mastery matrix, at-risk alerts, and learner deep-dives.</div>',
         unsafe_allow_html=True,
     )
 
+    if "auth_token" not in st.session_state:
+        st.session_state.auth_token = None
+    if "teacher_user" not in st.session_state:
+        st.session_state.teacher_user = None
+    if "teacher_classes" not in st.session_state:
+        st.session_state.teacher_classes = []
+
     with st.sidebar:
-        st.header("⚙️ API")
-        api_base = st.text_input("FastAPI Base URL", value=DEFAULT_API_BASE)
+        st.header("🔐 Teacher Login")
+        user_mgmt_base = st.text_input("User Management API", value=DEFAULT_USER_MGMT_API)
+        api_base = st.text_input("Analytics API (Component 4)", value=DEFAULT_API_BASE)
         api_timeout_s = st.number_input(
             "API timeout (seconds)",
             min_value=10.0,
@@ -492,32 +554,137 @@ div[data-testid="stDataFrame"] table {
             value=DEFAULT_API_TIMEOUT_S,
             step=5.0,
         )
-        st.caption("Analytics use **live BKT state** (Postgres + in-memory events since server start).")
 
-        st.header("🧪 Classroom Slice")
-        students_text = st.text_area(
-            "Student IDs (one per line)",
-            value="\n".join(DEFAULT_STUDENTS),
-            height=150,
+        logged_in = bool(st.session_state.auth_token)
+        if not logged_in:
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            if st.button("Log in", type="primary"):
+                try:
+                    with st.spinner("Signing in…"):
+                        token_payload = login_teacher(
+                            user_mgmt_base,
+                            email,
+                            password,
+                            timeout_s=float(api_timeout_s),
+                        )
+                    role = str((token_payload.get("user") or {}).get("role") or "")
+                    if role != "teacher":
+                        st.error("This account is not a teacher. Use a teacher login.")
+                    else:
+                        st.session_state.auth_token = token_payload.get("access_token")
+                        st.session_state.teacher_user = token_payload.get("user")
+                        st.session_state.teacher_classes = fetch_teacher_classes(
+                            user_mgmt_base,
+                            str(st.session_state.auth_token),
+                            timeout_s=float(api_timeout_s),
+                        )
+                        st.session_state.dashboard_data = None
+                        st.rerun()
+                except requests.RequestException as exc:
+                    st.error("Login failed. Check User Management API URL and credentials.")
+                    st.exception(exc)
+            st.info("Log in to load your classes and scoped classroom analytics.")
+            return
+
+        teacher = st.session_state.teacher_user or {}
+        st.success(f"Signed in as {teacher.get('full_name') or teacher.get('email') or 'Teacher'}")
+        if st.button("Log out"):
+            st.session_state.auth_token = None
+            st.session_state.teacher_user = None
+            st.session_state.teacher_classes = []
+            st.session_state.selected_class_code = None
+            st.session_state.dashboard_data = None
+            st.rerun()
+
+        st.header("🏫 Active Class")
+        classes = list(st.session_state.teacher_classes or [])
+        if not classes:
+            try:
+                classes = fetch_teacher_classes(
+                    user_mgmt_base,
+                    str(st.session_state.auth_token),
+                    timeout_s=float(api_timeout_s),
+                )
+                st.session_state.teacher_classes = classes
+            except requests.RequestException:
+                classes = []
+
+        if not classes:
+            st.warning("No classes found. Create a class in User Management, then refresh.")
+            if st.button("Reload classes"):
+                st.session_state.dashboard_data = None
+                st.rerun()
+            return
+
+        class_options = {str(c["class_code"]): c for c in classes if c.get("class_code")}
+        default_code = next(iter(class_options))
+        if st.session_state.get("selected_class_code") not in class_options:
+            st.session_state.selected_class_code = default_code
+
+        selected_code = st.selectbox(
+            "Classroom",
+            options=list(class_options.keys()),
+            format_func=lambda code: _class_label(class_options[code]),
+            index=list(class_options.keys()).index(st.session_state.selected_class_code),
+            key="classroom_select",
         )
-        use_all_topics = st.checkbox(
-            f"Use all hierarchy topics ({len(DEFAULT_TOPICS)} from Excel)",
-            value=True,
-            help="Loads topic columns from Data/Skill-Heirarchies-G6-G9.xlsx in curriculum order.",
+        st.session_state.selected_class_code = selected_code
+        active_class = class_options[selected_code]
+
+        st.markdown(
+            f"**Class code:** `{active_class.get('class_code')}`  \n"
+            f"**Grade:** {active_class.get('grade_level')} · **Subject:** {active_class.get('subject', 'Science')}"
         )
-        if use_all_topics:
-            topic_ids_ui = list(DEFAULT_TOPICS)
-            st.caption(f"Loaded `{SKILL_HIERARCHY_XLSX.name}` → {len(topic_ids_ui)} topic columns.")
-            with st.expander("Preview topic IDs", expanded=False):
-                st.code("\n".join(topic_ids_ui), language="text")
-        else:
-            topics_text = st.text_area(
-                "Topic IDs (one per line)",
-                value="\n".join(DEFAULT_TOPICS[:12]),
-                height=180,
+        st.caption("Share this code with learners so they can enroll.")
+
+        manual_mode = st.checkbox("Manual roster override (dev only)", value=False)
+        st.session_state.manual_mode = manual_mode
+        if manual_mode:
+            st.caption("Bypasses class_code and sends explicit student/topic IDs.")
+            students_text = st.text_area(
+                "Student IDs (one per line)",
+                value="\n".join(DEFAULT_STUDENTS),
+                height=120,
             )
-            topic_ids_ui = parse_lines(topics_text)
+            use_all_topics = st.checkbox(
+                f"Use all hierarchy topics ({len(DEFAULT_TOPICS)} from Excel)",
+                value=False,
+            )
+            if use_all_topics:
+                topic_ids_ui = list(DEFAULT_TOPICS)
+            else:
+                grade = int(active_class.get("grade_level") or 7)
+                prefix = f"G{grade}_"
+                topic_ids_ui = [t for t in DEFAULT_TOPICS if t.upper().startswith(prefix)]
+            if not use_all_topics:
+                topics_text = st.text_area(
+                    "Topic IDs (one per line)",
+                    value="\n".join(topic_ids_ui),
+                    height=120,
+                )
+                topic_ids_ui = parse_lines(topics_text)
+            st.session_state.manual_student_ids = parse_lines(students_text)
+            st.session_state.manual_topic_ids = list(topic_ids_ui)
+
         run = st.button("🔄 Refresh Dashboard Data", type="primary")
+
+    active_class_code = str(st.session_state.get("selected_class_code") or "")
+    active_class = next(
+        (c for c in (st.session_state.teacher_classes or []) if c.get("class_code") == active_class_code),
+        {},
+    )
+
+    if active_class:
+        h1, h2 = st.columns([3, 1])
+        with h1:
+            st.markdown(
+                f"### {active_class.get('class_name', 'Classroom')} "
+                f"<span style='color:#64748b;font-size:0.95rem;'>(Grade {active_class.get('grade_level')})</span>",
+                unsafe_allow_html=True,
+            )
+        with h2:
+            st.code(str(active_class.get("class_code") or ""), language=None)
 
     # Auto-load once on first render so the dashboard isn't blank.
     if "autoload_done" not in st.session_state:
@@ -526,40 +693,73 @@ div[data-testid="stDataFrame"] table {
     if "dashboard_data" not in st.session_state:
         st.session_state.dashboard_data = None
 
-    student_ids = parse_lines(students_text)
-    topic_ids = topic_ids_ui
-    if not student_ids or not topic_ids:
-        st.error("Please provide at least one student ID and one topic ID.")
+    use_manual = bool(st.session_state.get("manual_mode"))
+    student_ids: list[str] = []
+    topic_ids: list[str] = []
+    class_code: str | None = active_class_code if not use_manual else None
+
+    if use_manual:
+        student_ids = list(st.session_state.get("manual_student_ids") or [])
+        topic_ids = list(st.session_state.get("manual_topic_ids") or [])
+        if not student_ids or not topic_ids:
+            st.error("Manual mode requires at least one student ID and one topic ID.")
+            return
+    elif not class_code:
+        st.error("Select a class to load scoped analytics.")
         return
 
-    should_reload = bool(run) or st.session_state.dashboard_data is None
+    should_reload = (
+        bool(run)
+        or st.session_state.dashboard_data is None
+        or st.session_state.dashboard_data.get("class_code") != class_code
+    )
     if should_reload:
         try:
-            with st.spinner("Loading live mastery and at-risk analytics…"):
+            with st.spinner("Loading class-scoped mastery and at-risk analytics…"):
                 payload = fetch_mastery_matrix(
                     api_base,
-                    student_ids,
-                    topic_ids,
+                    class_code=class_code,
+                    student_ids=student_ids or None,
+                    topic_ids=topic_ids or None,
                     timeout_s=float(api_timeout_s),
                 )
                 risk_payload = fetch_at_risk_students(
                     api_base,
-                    student_ids,
-                    topic_ids,
+                    class_code=class_code,
+                    student_ids=student_ids or None,
+                    topic_ids=topic_ids or None,
                     timeout_s=float(api_timeout_s),
                 )
         except requests.RequestException as exc:
             st.error(
                 "Could not fetch mastery data from FastAPI. "
-                "Make sure your API server is running (e.g., uvicorn main:app --reload)."
+                "Make sure Analytics API and DATABASE_URL are configured."
             )
             st.exception(exc)
             return
+        if not payload.get("success"):
+            st.error(payload.get("error") or payload)
+            return
+        if not risk_payload.get("success"):
+            st.error(risk_payload.get("error") or risk_payload)
+            return
+
+        topic_ids = list(payload.get("topic_ids") or topic_ids)
+        student_ids = list(payload.get("student_ids") or student_ids)
+        if not student_ids:
+            st.warning("This class has no enrolled learners yet.")
+        if not topic_ids:
+            st.warning(
+                "No grade-scoped topics found. Populate `shared.topics` or ensure BKT skills "
+                f"exist for Grade {payload.get('grade_level') or active_class.get('grade_level')}."
+            )
+
         st.session_state.dashboard_data = {
             "payload": payload,
             "risk_payload": risk_payload,
             "student_ids": student_ids,
             "topic_ids": topic_ids,
+            "class_code": class_code or payload.get("class_code"),
             "api_base": api_base,
             "api_timeout_s": float(api_timeout_s),
         }
@@ -569,6 +769,7 @@ div[data-testid="stDataFrame"] table {
         risk_payload = data["risk_payload"]
         student_ids = data["student_ids"]
         topic_ids = data["topic_ids"]
+        class_code = data.get("class_code")
         api_base = data["api_base"]
         api_timeout_s = data["api_timeout_s"]
 
@@ -577,6 +778,10 @@ div[data-testid="stDataFrame"] table {
         return
     if not risk_payload.get("success"):
         st.error(f"At-risk analytics API returned an error: {risk_payload}")
+        return
+
+    if not student_ids or not topic_ids:
+        st.info("Add learners to this class to populate the mastery matrix.")
         return
 
     df = matrix_to_dataframe(payload["mastery_matrix"], topic_ids=topic_ids)
@@ -589,9 +794,12 @@ div[data-testid="stDataFrame"] table {
     c2.metric("🟢 Mastered cells", mastered_n)
     c3.metric("🟠 Learning cells", learning_n)
     c4.metric("🔴 At-Risk cells", at_risk_n)
+    grade_level = payload.get("grade_level") or active_class.get("grade_level")
     st.markdown(
         f'<div class="soft-card"><b>Data source:</b> live_state (Postgres + API events) &nbsp;|&nbsp; '
-        f"<b>Hierarchy source:</b> <code>{SKILL_HIERARCHY_XLSX.name}</code></div>",
+        f"<b>Class:</b> <code>{payload.get('class_code') or class_code or 'manual'}</code> &nbsp;|&nbsp; "
+        f"<b>Grade scope:</b> {grade_level} &nbsp;|&nbsp; "
+        f"<b>Topics:</b> {len(topic_ids)}</div>",
         unsafe_allow_html=True,
     )
 
@@ -682,7 +890,10 @@ div[data-testid="stDataFrame"] table {
 
     fig = build_heatmap(
         df,
-        title=f"Classroom Mastery Heatmap · {len(topic_ids)} topics · live_state",
+        title=(
+            f"Classroom Mastery Heatmap · Grade {grade_level} · "
+            f"{len(topic_ids)} topics · {len(student_ids)} learners"
+        ),
     )
     st.markdown('<div class="matrix-scroll">', unsafe_allow_html=True)
     st.plotly_chart(
@@ -737,6 +948,7 @@ div[data-testid="stDataFrame"] table {
             profile = fetch_student_profile(
                 api_base=api_base,
                 user_id=str(selected_student),
+                class_code=str(class_code) if class_code else None,
                 timeout_s=float(api_timeout_s),
             )
     except requests.RequestException as exc:

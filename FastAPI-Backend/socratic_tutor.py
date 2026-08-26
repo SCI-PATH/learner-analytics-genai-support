@@ -5,9 +5,10 @@ Socratic tutoring hints grounded in BKT mastery and the local syllabus RAG index
 process-wide ``ScienceBKT`` and one ``student_state[(user_id, skill)]`` trajectory.
 - **Assessment / quiz** (``POST /api/v1/assessment-submit`` in ``main.py``): pass
   verified ``is_correct`` into ``predict_update`` — ground-truth labels.
-- **Dialogue** (this module): optional noisy BKT updates when scores are decisive
-  (see ``TUTOR_BKT_POLICY``: ``strict`` / ``quiz_only`` / ``legacy``). Ambiguous scores
-  skip updates under ``strict``. Missing/invalid scores → **no** BKT update that turn.
+- **Dialogue** (this module): does **not** update BKT by default
+  (``TUTOR_BKT_POLICY=quiz_only``). Set ``strict`` / ``legacy`` to allow
+  dialogue-derived updates. Ambiguous scores skip updates under ``strict``.
+  Missing/invalid scores → **no** BKT update that turn.
 
 Uses Groq via langchain_groq (env-based). The tutor follows a state-aware Socratic
 framework (correction-first when needed, mastery-tuned scaffolding).
@@ -19,9 +20,10 @@ Environment:
   GROQ_API_KEY (loaded from .env)
   GROQ_MODEL_NAME: Groq model id (default ``openai/gpt-oss-120b``).
   TUTOR_LLM_MAX_TOKENS: optional int (default ``512``).
-  TUTOR_BKT_POLICY: how dialogue updates BKT — ``strict`` (default): only clear
-    correct/incorrect scores update mastery; ambiguous mid scores skip updates.
-    ``quiz_only``: never update BKT from chat; use ``/api/v1/assessment-submit`` only.
+  TUTOR_BKT_POLICY: how dialogue updates BKT — ``quiz_only`` (default): never
+    update BKT from chat; use ``/api/v1/assessment-submit`` only.
+    ``strict``: only clear correct/incorrect scores update mastery; ambiguous
+    mid scores skip updates.
     ``legacy``: old rule (score×0.5 then ≥0.25 ⇒ correct — very optimistic).
   TUTOR_LLM_TEMPERATURE: optional float (default ``0.35`` for steadier scoring).
   TUTOR_DEFAULT_PERSONA: optional persona_id if client omits one (else random per turn).
@@ -691,9 +693,9 @@ def _tutor_llm_max_tokens() -> int:
 
 
 def _tutor_bkt_policy() -> Literal["quiz_only", "strict", "legacy"]:
-    """How chat turns update BKT; default ``strict`` to avoid falsely rising mastery."""
+    """How chat turns update BKT; default ``quiz_only`` so only assessments change mastery."""
     _load_env()
-    raw = (os.environ.get("TUTOR_BKT_POLICY") or "strict").strip().lower()
+    raw = (os.environ.get("TUTOR_BKT_POLICY") or "quiz_only").strip().lower()
     if raw in {"quiz_only", "quiz-only", "off", "false", "0", "none", "assessment_only"}:
         return "quiz_only"
     if raw in {"legacy", "lenient", "old"}:
@@ -1358,7 +1360,7 @@ def generate_socratic_hint(
     """
     Combine BKT mastery, local RAG context, and an LLM to produce a Socratic hint.
 
-    Dialogue mastery updates follow ``TUTOR_BKT_POLICY`` (default ``strict``).
+    Dialogue mastery updates follow ``TUTOR_BKT_POLICY`` (default ``quiz_only``).
     Missing or invalid ``interaction_score`` → no BKT update that turn.
 
     Parameters

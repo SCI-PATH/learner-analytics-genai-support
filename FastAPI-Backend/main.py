@@ -5,7 +5,7 @@ FastAPI app exposing Socratic hint endpoints.
 Per learner and skill there is a **single** ``student_state`` trajectory.
 ``POST /api/v1/assessment-submit`` applies **ground-truth** ``is_correct``;
 ``/tutor/hint*`` may apply dialogue-derived updates per ``TUTOR_BKT_POLICY`` in
-``socratic_tutor`` (default strict; ``quiz_only`` disables chat-driven BKT).
+``socratic_tutor`` (default ``quiz_only``; ``strict`` / ``legacy`` allow chat-driven BKT).
 
 Run:
     uvicorn main:app --reload
@@ -1267,7 +1267,7 @@ def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
     Explicit topic flow:
     client provides user_id + topic_id + student_answer.
 
-    **BKT:** Dialogue updates follow ``TUTOR_BKT_POLICY`` (strict / quiz_only / legacy).
+    **BKT:** Dialogue updates follow ``TUTOR_BKT_POLICY`` (default quiz_only; also strict / legacy).
     Use ``conversation_history`` so the model can treat replies as continuation.
     Verified quiz outcomes: ``/api/v1/assessment-submit``.
     """

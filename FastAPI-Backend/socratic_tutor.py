@@ -26,7 +26,9 @@ Environment:
     mid scores skip updates.
     ``legacy``: old rule (score×0.5 then ≥0.25 ⇒ correct — very optimistic).
   TUTOR_LLM_TEMPERATURE: optional float (default ``0.35`` for steadier scoring).
-  TUTOR_DEFAULT_PERSONA: optional persona_id if client omits one (else random per turn).
+  TUTOR_DEFAULT_PERSONA: optional persona_id if client omits one and frustration
+    is not high (else random per turn). High frustration always uses
+    practical_encourager, even when the client sends persona_id.
 """
 
 from __future__ import annotations
@@ -900,6 +902,7 @@ def _acknowledgment_closure_response(
     user_id: str,
     topic_id: str,
     persona_id: Optional[str],
+    student_answer: str = "",
     bkt: Optional[ScienceBKT] = None,
     topic_id_inferred: bool = False,
     topic_changed: bool = False,
@@ -907,9 +910,19 @@ def _acknowledgment_closure_response(
     """Persona-matched closing reply; skips RAG, LLM Socratic loop, and BKT updates."""
     engine = bkt or _get_default_bkt()
     mastery = float(engine.get_current_mastery_probability(user_id, topic_id))
-    resolved_persona = _resolve_persona_id(persona_id, user_id)
+    frustration_resolution = resolve_frustration_for_turn(
+        user_id, topic_id, student_answer
+    )
+    resolved_persona = _resolve_persona_id(
+        persona_id,
+        user_id,
+        frustration_level=frustration_resolution.level,
+    )
     persona_label = _PERSONA_LABELS[resolved_persona]
     hint_text = _ACKNOWLEDGMENT_CLOSURES[resolved_persona]
+    frustration_audit = build_frustration_audit_fields(
+        frustration_resolution, resolved_persona
+    )
     return {
         "success": True,
         "user_id": str(user_id),
@@ -934,8 +947,9 @@ def _acknowledgment_closure_response(
             "skipped": True,
             "skip_reason": "acknowledgment_intent",
         },
-        "frustration_level_used": None,
-        "frustration_score_used": None,
+        "frustration_level_used": frustration_resolution.level,
+        "frustration_score_used": frustration_resolution.effective_score,
+        **frustration_audit,
         "llm_model": None,
         "conversation_intent": "acknowledgment",
         "socratic_loop_bypassed": True,
@@ -950,11 +964,28 @@ def _greeting_opener_response(
     *,
     user_id: str,
     persona_id: Optional[str],
+    student_answer: str = "",
+    topic_id: Optional[str] = None,
     bkt: Optional[ScienceBKT] = None,
 ) -> dict[str, Any]:
     """Invite the student to name a science topic; skip RAG / LLM / BKT / topic routing."""
-    resolved_persona = _resolve_persona_id(persona_id, user_id)
+    sticky_topic = (
+        topic_id
+        or _last_resolved_topic_by_user.get(str(user_id))
+        or FALLBACK_TOPIC_ID
+    )
+    frustration_resolution = resolve_frustration_for_turn(
+        user_id, sticky_topic, student_answer
+    )
+    resolved_persona = _resolve_persona_id(
+        persona_id,
+        user_id,
+        frustration_level=frustration_resolution.level,
+    )
     persona_label = _PERSONA_LABELS[resolved_persona]
+    frustration_audit = build_frustration_audit_fields(
+        frustration_resolution, resolved_persona
+    )
     return {
         "success": True,
         "user_id": str(user_id),
@@ -982,8 +1013,9 @@ def _greeting_opener_response(
             "skipped": True,
             "skip_reason": "greeting_intent",
         },
-        "frustration_level_used": None,
-        "frustration_score_used": None,
+        "frustration_level_used": frustration_resolution.level,
+        "frustration_score_used": frustration_resolution.effective_score,
+        **frustration_audit,
         "llm_model": None,
         "conversation_intent": "greeting",
         "socratic_loop_bypassed": True,
@@ -1003,9 +1035,12 @@ def _resolve_persona_id(
     """
     Resolve active persona for this turn.
 
-    Priority: client ``persona_id`` → ``TUTOR_DEFAULT_PERSONA`` env → high-frustration
-    nudge (Practical Encourager) → random rotation.
+    Priority: high frustration (Practical Encourager) → client ``persona_id`` →
+    ``TUTOR_DEFAULT_PERSONA`` env → random rotation.
     """
+    if frustration_level == "high":
+        return "practical_encourager"
+
     if persona_id:
         normalized = persona_id.strip().lower().replace("-", "_").replace(" ", "_")
         resolved = _PERSONA_ALIASES.get(normalized)
@@ -1018,9 +1053,6 @@ def _resolve_persona_id(
         resolved = _PERSONA_ALIASES.get(env_norm)
         if resolved:
             return resolved
-
-    if frustration_level == "high":
-        return "practical_encourager"
 
     _ = user_id  # reserved for future per-learner rotation policies
     return random.choice(list(_VALID_PERSONAS))
@@ -1377,8 +1409,9 @@ def generate_socratic_hint(
         Number of syllabus chunks to retrieve.
     persona_id :
         Optional tutor persona (``practical_encourager``, ``analytical_coach``,
-        ``curious_explorer``). If omitted, server picks ``TUTOR_DEFAULT_PERSONA`` or
-        rotates randomly each turn.
+        ``curious_explorer``). High frustration still forces Practical Encourager.
+        If omitted and frustration is not high, server picks ``TUTOR_DEFAULT_PERSONA``
+        or rotates randomly each turn.
     """
     # Ensure .env variables (including HF_TOKEN / GROQ_API_KEY) are available
     # before retrieval and model calls.
@@ -1388,6 +1421,8 @@ def generate_socratic_hint(
         return _greeting_opener_response(
             user_id=user_id,
             persona_id=persona_id,
+            student_answer=student_answer,
+            topic_id=topic_id,
             bkt=bkt,
         )
 
@@ -1396,6 +1431,7 @@ def generate_socratic_hint(
             user_id=user_id,
             topic_id=topic_id,
             persona_id=persona_id,
+            student_answer=student_answer,
             bkt=bkt,
             topic_id_inferred=False,
             topic_changed=False,
@@ -1600,6 +1636,8 @@ def generate_socratic_hint_auto_topic(
         response = _greeting_opener_response(
             user_id=user_id,
             persona_id=persona_id,
+            student_answer=student_answer,
+            topic_id=topic_id,
             bkt=bkt,
         )
         response["topic_routing"] = "none"
@@ -1615,6 +1653,7 @@ def generate_socratic_hint_auto_topic(
             user_id=user_id,
             topic_id=normalize_topic_id(sticky_topic),
             persona_id=persona_id,
+            student_answer=student_answer,
             bkt=bkt,
             topic_id_inferred=topic_id is None,
             topic_changed=False,

@@ -73,13 +73,13 @@ The chatbot and assessment endpoints share the same BKT engine instance:
 
 The environment variable controls whether chat can update mastery:
 
-- `strict` (default):
+- `quiz_only` (default):
+  - chat never updates BKT,
+  - only `/api/v1/assessment-submit` updates mastery.
+- `strict`:
   - `interaction_score >= 0.78` -> BKT label `1`,
   - `interaction_score <= 0.42` -> BKT label `0`,
   - otherwise skip update (`dialogue_score_ambiguous_bkt_skipped`).
-- `quiz_only`:
-  - chat never updates BKT,
-  - only `/api/v1/assessment-submit` updates mastery.
 - `legacy`:
   - uses discounted mapping (`score * 0.5 >= 0.25` -> label `1`),
   - intentionally lenient; can over-inflate mastery.
@@ -249,7 +249,7 @@ So "training constraints" in practice are:
 ## 13) Key environment variables
 
 - `GROQ_API_KEY`: required for LLM calls.
-- `TUTOR_BKT_POLICY`: `strict` (default), `quiz_only`, or `legacy`.
+- `TUTOR_BKT_POLICY`: `quiz_only` (default), `strict`, or `legacy`.
 - `TUTOR_LLM_TEMPERATURE`: response variability control (default `0.35`, clamped in code).
 
 BKT engine also has stabilization controls:

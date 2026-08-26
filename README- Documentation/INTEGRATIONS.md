@@ -81,29 +81,32 @@ If someone already uses another ID scheme, maintain a **mapping table** to these
 
 | Column | Meaning |
 |--------|---------|
-| Core Concept | Human-readable theme / grade grouping |
-| **Topic ID (Mocked for Assessment Module)** | **Canonical `topic_id` string** |
+| Core Concept / Chapter Title | Human-readable chapter theme |
+| **Topic ID (Canonical)** | **Canonical `topic_id` string** |
 | Curriculum Reference | Short description of the skill |
+
+Prefer the shareable full file: **`Data/Skill-Heirarchies-G6-G9-Full-Chapters.xlsx`**.
 
 **Format:**
 
 ```text
-G{grade}_S{section}_{DOMAIN_ABBREV}_{CONCEPT_ABBREV}
+G{grade}_C{chapter}_{DOMAIN_ABBREV}_{CONCEPT_ABBREV}
 ```
 
 Examples:
 
-- `G6_S8_ELE_CONDINS` — conductors / insulators  
-- `G6_S8_ELE_CIRCUITS` — circuits  
-- `G8_S3_PHO_PROCESS` — photosynthesis process  
-- `G9_S3_LIG_REFRAC` — refraction  
+- `G6_C8_ELE_CONDINS` — Grade 6 Chapter 8 conductors / insulators  
+- `G6_C8_ELE_CIRCUITS` — Grade 6 Chapter 8 circuits  
+- `G8_C11_PHO_PROCESS` — Grade 8 Chapter 11 photosynthesis  
+- `G9_C14_WAV_REFRACT` — Grade 9 Chapter 14 light refraction  
 
 **Rules for teammates:**
 
 1. Send `topic_id` **exactly** as listed (case-sensitive, underscores, no spaces).
-2. There are **57** leaf topic IDs spanning Grades **6–9**.
-3. Unknown IDs cause assessment/tutor errors or appear in `unknown_topic_ids` on the mastery matrix.
-4. Prefer one shared spreadsheet / enum package checked into a team channel so Content, Questions, and Analytics stay in sync.
+2. There are **128** leaf topic IDs spanning Grades **6–9** (every textbook chapter covered; 2 skills per chapter).
+3. Canonical spreadsheet: **`Data/Skill-Heirarchies-G6-G9-Full-Chapters.xlsx`** (also `Skill-Heirarchies-G6-G9-UPDATED.xlsx` if the older file is open).
+4. Unknown IDs cause assessment/tutor errors or appear in `unknown_topic_ids` on the mastery matrix.
+5. Prefer one shared spreadsheet so Content, Questions, and Analytics stay in sync.
 
 **Recommendation to the Question Engine owner:** yes — match **this** `topic_id` schema (the Excel already labels it for the Assessment Module). Content Generation should use the **same** IDs when tagging lessons and when telling Component 2 which topic is “active.”
 
@@ -140,10 +143,16 @@ Examples:
 {
   "success": true,
   "user_id": "U123",
-  "topic_id": "G6_S8_ELE_CIRCUITS",
+  "topic_id": "G6_C8_ELE_CIRCUITS",
   "is_correct": true,
   "updated_mastery_probability": 0.71,
   "mastery_probability": 0.71,
+  "mastery_category": "intermediate",
+  "mastery_category_thresholds": {
+    "basic": "P(L) < 0.50",
+    "intermediate": "0.50 <= P(L) < 0.80",
+    "advanced": "P(L) >= 0.80"
+  },
   "risk_flag": false,
   "bkt_observation_label": 1,
   "label_source": "assessment"
@@ -155,7 +164,11 @@ Examples:
 1. Map `is_correct` → BKT label `1` / `0`
 2. `predict_update(user_id, topic_id, label)` on the **shared** BKT engine
 3. Persist event for restart resilience
-4. Return updated `P(L)` mastery and `risk_flag`
+4. Return updated `P(L)` mastery, derived **`mastery_category`**, and `risk_flag`
+
+**Read without submitting:** `GET /api/v1/mastery/{user_id}/{topic_id}` returns the same `mastery_probability` + `mastery_category` without recording a new attempt.
+
+**Quiz start (chapter-scoped):** `POST /api/v1/quiz/bkt-snapshot` with `{ user_id, chapter_ids }`. See [`Integrations/QuestionEngine-BKT-Snapshot.md`](./Integrations/QuestionEngine-BKT-Snapshot.md). `assessment-submit` also returns a `topic_bkt` map for the active chapter(s).
 
 #### Proposal-aligned fields we do **not** require yet (optional future)
 
@@ -179,7 +192,10 @@ Your proposal / assessment design may also produce:
 ### 3.2 Component 3 → Component 4 (Engagement / frustration cues)
 
 **Endpoint (you call us):** `POST /api/v1/engagement/frustration-cue`  
-**Purpose:** Sentiment-aware **tutor tone** only — does **not** change BKT mastery.
+**Purpose:** Sentiment-aware **tutor tone** only — does **not** change BKT mastery.  
+**Teammate README:** [`Integrations/FrustrationCue-Engagement-Integration.md`](Integrations/FrustrationCue-Engagement-Integration.md)
+
+Agreed UX: the in-game chatbot unlocks **after the level**, not during scored questions. Component 3 should POST the cue at **level complete / chatbot unlock**.
 
 #### Required fields
 
@@ -187,7 +203,7 @@ Your proposal / assessment design may also produce:
 |-------|------|----------|-------------|
 | `user_id` | string | **Yes** | Same learner ID as assessment / tutor |
 | `topic_id` | string | **Yes** | Current lesson / quiz topic (canonical ID) |
-| `frustration_score` | float `0.0–1.0` | **Yes** | Normalized frustration intensity |
+| `frustration_score` | float `0.0–1.0` | **Yes** | Normalized frustration intensity. Values `> 1` up to `100` are treated as a 0–100 score and divided by 100. |
 | `source` | string | No (default `engagement_module`) | Producer name / version |
 
 #### Example request
@@ -223,7 +239,7 @@ Your proposal / assessment design may also produce:
 }
 ```
 
-**Team ask:** send the latest cue when engagement models detect elevated frustration **for the active topic**. We store the latest cue per `(user_id, topic_id)` and consume it on the next tutor turn.
+**Team ask:** POST the level’s latest cue (including **low** scores) at **chatbot unlock**, with the same `topic_id` as the level. We store the latest cue per `(user_id, topic_id)` and consume it on the next tutor turn. Do not POST every mouse sample. Do not send Component 3’s `VERY_LOW`…`VERY_HIGH` labels — we remap to `low` / `medium` / `high`.
 
 ---
 
@@ -359,9 +375,9 @@ This matches the proposal loop:
 | 1 | Use shared `topic_id` list from `Skill-Heirarchies-G6-G9.xlsx` | All |
 | 2 | Keep separate RAG indexes (no forced shared Chroma) | All |
 | 3 | After scoring, call `POST /api/v1/assessment-submit` with `{user_id, topic_id, is_correct}` | Component 2 |
-| 4 | When starting a quiz, optionally `GET` student profile / mastery for baseline | Component 2 |
+| 4 | When starting a quiz, `POST /api/v1/quiz/bkt-snapshot` with `{user_id, chapter_ids}` | Component 2 |
 | 5 | When building next-day path, `POST` mastery matrix / at-risk | Component 1 |
-| 6 | When frustration rises, `POST` frustration-cue with same `topic_id` | Component 3 |
+| 6 | At level complete / chatbot unlock, `POST` frustration-cue (`FS/100`) with same `topic_id` | Component 3 |
 
 **Bottom line for the Question Engine owner:**  
 You do **not** need to share PDF chunks with Component 4. You **do** need to use the **same `topic_id` strings** Component 4 (and ideally Content) use — ask them to match this schema (or map into it before the assessment-submit call).
@@ -380,6 +396,13 @@ You do **not** need to share PDF chunks with Component 4. You **do** need to use
 
 ```http
 GET /health
+```
+
+```http
+POST /api/v1/quiz/bkt-snapshot
+Content-Type: application/json
+
+{ "user_id": "demo_student", "chapter_ids": ["G6_C8"] }
 ```
 
 ```http
@@ -431,7 +454,7 @@ Do **not** silently rename existing IDs — that breaks historical mastery traje
 
 | Doc | Use |
 |-----|-----|
-| [`DEMO_FLOW.md`](./DEMO_FLOW.md) | End-to-end demo JSON |
+| [`Integrations/QuestionEngine-BKT-Snapshot.md`](./Integrations/QuestionEngine-BKT-Snapshot.md) | Quiz init snapshot + `assessment-submit` `topic_bkt` map |
 | [`SOCRATIC_CHATBOT.md`](./SOCRATIC_CHATBOT.md) | Tutor behaviour |
 | [`BKT MASTERY EXPLAINED.md`](./BKT%20MASTERY%20EXPLAINED.md) | What `P(L)` means |
 | [`Phase-2/Phase2-Features.md`](./Phase-2/Phase2-Features.md) | G6–G9 RAG, auto-topic, personas |

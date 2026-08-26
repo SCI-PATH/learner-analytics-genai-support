@@ -875,7 +875,8 @@ class TutorHintRequest(BaseModel):
         None,
         description=(
             "Tutor persona: practical_encourager, analytical_coach, or curious_explorer. "
-            "If omitted, server uses TUTOR_DEFAULT_PERSONA or rotates randomly per turn."
+            "High frustration still uses practical_encourager. Otherwise if omitted, "
+            "server uses TUTOR_DEFAULT_PERSONA or rotates randomly per turn."
         ),
     )
 
@@ -896,7 +897,8 @@ class TutorHintAutoTopicRequest(BaseModel):
         None,
         description=(
             "Tutor persona: practical_encourager, analytical_coach, or curious_explorer. "
-            "If omitted, server uses TUTOR_DEFAULT_PERSONA or rotates randomly per turn."
+            "High frustration still uses practical_encourager. Otherwise if omitted, "
+            "server uses TUTOR_DEFAULT_PERSONA or rotates randomly per turn."
         ),
     )
 

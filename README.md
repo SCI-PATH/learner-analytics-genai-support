@@ -52,6 +52,9 @@ streamlit run Streamlit-UIs/teacher_dashboard.py --server.port 8502
 
 See README- Documentation/INTEGRATIONS.md and README- Documentation/DEMO_FLOW.md for full API and demo details.
 
+**Teacher Classroom Insights (Next.js educator dashboard) endpoints:**  
+[`README- Documentation/Teacher-Analytics-Dashboard-API.md`](README-%20Documentation/Teacher-Analytics-Dashboard-API.md) — every API the teacher analytics page calls and what each field means.
+
 ---
 
 ## Repository structure

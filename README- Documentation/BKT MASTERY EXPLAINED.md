@@ -81,8 +81,8 @@ When the learner uses a **Socratic hint** endpoint (`socratic_tutor.py`):
 1. The tutor reads **current mastery** (without adding an observation) to choose hint style.
 2. The LLM returns JSON including **`interaction_score`** (0–1), meant to reflect how well the student’s message aligns with the topic.
 3. Whether dialogue updates mastery depends on env **`TUTOR_BKT_POLICY`**:
-   - **`strict` (default):** update only on decisive scores (`interaction_score >= 0.78` -> label `1`, `<= 0.42` -> label `0`); ambiguous mid-range scores skip BKT updates.
-   - **`quiz_only`:** dialogue never calls `predict_update`; only quiz events update mastery.
+   - **`quiz_only` (default):** dialogue never calls `predict_update`; only quiz events update mastery.
+   - **`strict`:** update only on decisive scores (`interaction_score >= 0.78` -> label `1`, `<= 0.42` -> label `0`); ambiguous mid-range scores skip BKT updates.
    - **`legacy`:** older lenient mapping (`score * 0.5 >= 0.25` => label `1`), kept for backward compatibility.
 4. So tutor chat can be either update-enabled or update-disabled depending on this policy.
 

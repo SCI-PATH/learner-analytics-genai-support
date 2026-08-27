@@ -432,6 +432,51 @@ def score_frustration_from_chat(student_answer: str) -> float:
     return max(0.0, min(1.0, score))
 
 
+def ensure_gaming_frustration_cue(
+    user_id: str,
+    topic_id: str,
+    *,
+    session_id: Optional[str] = None,
+) -> Optional["FrustrationSignal"]:
+    """
+    If no in-memory cue exists for this learner+topic, pull Component 3's GET API.
+
+    Fail-open: a down gaming backend must not block tutor turns.
+    """
+    stored = _get_frustration_signal(user_id, topic_id)
+    if stored is not None:
+        return stored
+    try:
+        from gaming_frustration_client import fetch_gaming_frustration
+
+        snapshot = fetch_gaming_frustration(str(user_id), session_id=session_id)
+    except Exception:
+        return None
+    if not snapshot:
+        return None
+    signal = upsert_frustration_signal(
+        user_id=user_id,
+        topic_id=topic_id,
+        frustration_score=float(snapshot["frustration_score"]),
+        source=str(snapshot.get("source") or "gaming_service_get"),
+    )
+    try:
+        from postgres_store import insert_frustration_cue
+
+        insert_frustration_cue(
+            {
+                "user_id": str(user_id),
+                "topic_id": str(topic_id),
+                "frustration_score": float(signal.frustration_score),
+                "source": str(signal.source),
+                "recorded_at": signal.recorded_at.isoformat(),
+            }
+        )
+    except Exception:
+        pass
+    return signal
+
+
 def upsert_frustration_signal(
     user_id: str,
     topic_id: str,
@@ -1416,6 +1461,8 @@ def generate_socratic_hint(
     # Ensure .env variables (including HF_TOKEN / GROQ_API_KEY) are available
     # before retrieval and model calls.
     _load_env()
+    if topic_id:
+        ensure_gaming_frustration_cue(user_id, normalize_topic_id(topic_id))
 
     if _is_greeting_intent(student_answer):
         return _greeting_opener_response(
@@ -1632,6 +1679,13 @@ def generate_socratic_hint_auto_topic(
     Acknowledgment / gratitude and standalone greetings short-circuit before
     topic inference and RAG.
     """
+    sticky_for_cue = (
+        topic_id
+        or _last_resolved_topic_by_user.get(str(user_id))
+        or FALLBACK_TOPIC_ID
+    )
+    ensure_gaming_frustration_cue(user_id, normalize_topic_id(sticky_for_cue))
+
     if _is_greeting_intent(student_answer):
         response = _greeting_opener_response(
             user_id=user_id,
@@ -1695,6 +1749,7 @@ __all__ = [
     "get_shared_bkt_engine",
     "infer_topic_id_from_question",
     "upsert_frustration_signal",
+    "ensure_gaming_frustration_cue",
     "score_frustration_from_chat",
     "resolve_frustration_for_turn",
     "consume_frustration_after_hint",

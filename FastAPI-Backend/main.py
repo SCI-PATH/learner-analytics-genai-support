@@ -55,6 +55,7 @@ from postgres_store import (
     list_distinct_learner_ids,
     postgres_configured,
 )
+from gaming_frustration_client import fetch_gaming_frustration, gaming_api_base
 from socratic_tutor import (
     generate_socratic_hint,
     generate_socratic_hint_auto_topic,
@@ -126,6 +127,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -1056,6 +1059,17 @@ class FrustrationCueSubmitRequest(BaseModel):
         return max(0.0, min(1.0, score))
 
 
+class GamingFrustrationSyncRequest(BaseModel):
+    """Pull Component 3's latest score and store it as a tutor tone cue."""
+
+    user_id: str = Field(..., description="Same studentId used at farm launch")
+    topic_id: str = Field(..., description="Canonical curriculum topic for this lesson")
+    session_id: Optional[str] = Field(
+        None,
+        description="Optional farm sessionId to scope the gaming GET",
+    )
+
+
 class MasteryMatrixRequest(BaseModel):
     """Request payload for classroom mastery matrix (live BKT + Postgres state)."""
 
@@ -1543,6 +1557,44 @@ def assessment_submit(req: AssessmentSubmitRequest) -> dict[str, Any]:
     }
 
 
+def _store_frustration_cue(
+    *,
+    user_id: str,
+    topic_id: str,
+    frustration_score: float,
+    source: str,
+) -> dict[str, Any]:
+    signal = upsert_frustration_signal(
+        user_id=user_id,
+        topic_id=topic_id,
+        frustration_score=frustration_score,
+        source=source,
+    )
+    _frustration_history[(str(user_id), str(topic_id))].append(float(signal.frustration_score))
+    cue_record = {
+        "user_id": str(user_id),
+        "topic_id": str(topic_id),
+        "frustration_score": float(signal.frustration_score),
+        "source": str(signal.source),
+        "recorded_at": signal.recorded_at.isoformat(),
+    }
+    _persist_event("frustration_cue", cue_record)
+    postgres_cue = insert_frustration_cue(cue_record)
+    return {
+        "success": True,
+        "user_id": user_id,
+        "topic_id": topic_id,
+        "frustration_score": signal.frustration_score,
+        "frustration_level": signal.level,
+        "source": signal.source,
+        "recorded_at": signal.recorded_at.isoformat(),
+        "decay_tau_seconds": 600,
+        "effective_floor": 0.2,
+        "used_by": ["/tutor/hint", "/tutor/hint-auto-topic"],
+        "postgres": postgres_cue,
+    }
+
+
 @app.post(
     "/api/v1/engagement/frustration-cue",
     tags=["Engagement"],
@@ -1556,35 +1608,74 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
     This does not directly update BKT mastery. Instead, the next tutor response for
     this ``(user_id, topic_id)`` consumes the latest cue to adapt tone/pacing.
     """
-    signal = upsert_frustration_signal(
+    return _store_frustration_cue(
         user_id=req.user_id,
         topic_id=req.topic_id,
         frustration_score=req.frustration_score,
         source=req.source,
     )
-    _frustration_history[(str(req.user_id), str(req.topic_id))].append(float(signal.frustration_score))
-    cue_record = {
-        "user_id": str(req.user_id),
-        "topic_id": str(req.topic_id),
-        "frustration_score": float(signal.frustration_score),
-        "source": str(signal.source),
-        "recorded_at": signal.recorded_at.isoformat(),
-    }
-    _persist_event("frustration_cue", cue_record)
-    postgres_cue = insert_frustration_cue(cue_record)
+
+
+@app.get(
+    "/api/v1/engagement/frustration-from-gaming",
+    tags=["Engagement"],
+    summary="Read latest farm frustration from Component 3",
+    response_description="Normalized 0–1 score from gaming GET /api/engagement/frustration",
+)
+def engagement_frustration_from_gaming(
+    user_id: str = Query(..., description="Same studentId used at farm launch"),
+    session_id: Optional[str] = Query(None, description="Optional farm sessionId"),
+) -> dict[str, Any]:
+    """Proxy Sachini's GET API so Component 4 can pull the live farm score."""
+    snapshot = fetch_gaming_frustration(user_id, session_id=session_id)
+    if snapshot is None:
+        return {
+            "success": False,
+            "user_id": user_id,
+            "gaming_api_base": gaming_api_base(),
+            "frustration_score": None,
+            "error": "gaming_frustration_unavailable",
+        }
     return {
         "success": True,
-        "user_id": req.user_id,
-        "topic_id": req.topic_id,
-        "frustration_score": signal.frustration_score,
-        "frustration_level": signal.level,
-        "source": signal.source,
-        "recorded_at": signal.recorded_at.isoformat(),
-        "decay_tau_seconds": 600,
-        "effective_floor": 0.2,
-        "used_by": ["/tutor/hint", "/tutor/hint-auto-topic"],
-        "postgres": postgres_cue,
+        "user_id": user_id,
+        "gaming_api_base": gaming_api_base(),
+        "frustration_score": snapshot["frustration_score"],
+        "frustration_score_100": snapshot.get("frustration_score_100"),
+        "frustration_level_gaming": snapshot.get("frustration_level_gaming"),
+        "session_id": snapshot.get("session_id"),
+        "recorded_at": snapshot.get("recorded_at"),
+        "source": snapshot.get("source"),
     }
+
+
+@app.post(
+    "/api/v1/engagement/sync-gaming-frustration",
+    tags=["Engagement"],
+    summary="Pull farm frustration and store tutor tone cue",
+    response_description="Stored cue for the next /tutor/hint turn",
+)
+def engagement_sync_gaming_frustration(req: GamingFrustrationSyncRequest) -> dict[str, Any]:
+    """GET Component 3 then POST internally so Socrates has a cue before the first chat."""
+    snapshot = fetch_gaming_frustration(req.user_id, session_id=req.session_id)
+    if snapshot is None:
+        return {
+            "success": False,
+            "user_id": req.user_id,
+            "topic_id": req.topic_id,
+            "gaming_api_base": gaming_api_base(),
+            "error": "gaming_frustration_unavailable",
+        }
+    stored = _store_frustration_cue(
+        user_id=req.user_id,
+        topic_id=req.topic_id,
+        frustration_score=float(snapshot["frustration_score"]),
+        source=str(snapshot.get("source") or "gaming_service_get"),
+    )
+    stored["frustration_score_100"] = snapshot.get("frustration_score_100")
+    stored["frustration_level_gaming"] = snapshot.get("frustration_level_gaming")
+    stored["pulled_from"] = gaming_api_base()
+    return stored
 
 
 @app.get(

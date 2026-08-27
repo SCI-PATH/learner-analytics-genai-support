@@ -21,6 +21,8 @@ langchain-community>=0.3,<1.0
 langchain-text-splitters>=0.3,<2.0
 chromadb>=0.5,<2.0
 pypdf>=4.0,<7.0
+# Install CPU torch first in Dockerfile (see FastAPI-Backend/Dockerfile) so pip
+# does not pull CUDA wheels that blow EC2 disk during image extract.
 sentence-transformers>=3.0,<6.0
 
 # --- Streamlit UIs ---

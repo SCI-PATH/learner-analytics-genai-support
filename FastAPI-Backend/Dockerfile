@@ -24,9 +24,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python deps first for better layer caching
+# Install Python deps first for better layer caching.
+# Force CPU-only torch first so sentence-transformers does not pull multi-GB CUDA wheels
+# (those fill small EC2 root volumes during docker pull/extract).
 COPY requirements.txt .
 RUN pip install --upgrade pip \
+    && pip install --index-url https://download.pytorch.org/whl/cpu \
+        "torch>=2.2,<3.0" \
     && pip install -r requirements.txt
 
 # App code + data the backend resolves via PROJECT_ROOT

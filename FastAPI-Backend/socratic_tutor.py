@@ -295,6 +295,7 @@ _default_bkt: Optional[ScienceBKT] = None
 _DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 _LLM_CLIENT_CACHE: Optional[tuple[Any, str]] = None
 _frustration_state: dict[tuple[str, str], "FrustrationSignal"] = {}
+_frustration_by_user: dict[str, "FrustrationSignal"] = {}
 _last_resolved_topic_by_user: dict[str, str] = {}
 
 # Epic 7 — frustration signal lifecycle (tone/persona only; zero BKT impact).
@@ -499,11 +500,15 @@ def upsert_frustration_signal(
         recorded_at=recorded_at or _utc_now(),
     )
     _frustration_state[(str(user_id), str(topic_id))] = signal
+    _frustration_by_user[str(user_id)] = signal
     return signal
 
 
 def _get_frustration_signal(user_id: str, topic_id: str) -> Optional[FrustrationSignal]:
-    return _frustration_state.get((str(user_id), str(topic_id)))
+    """Topic cue first; else the student's latest overall gaming score."""
+    return _frustration_state.get((str(user_id), str(topic_id))) or _frustration_by_user.get(
+        str(user_id)
+    )
 
 
 def resolve_frustration_for_turn(
@@ -578,29 +583,43 @@ def consume_frustration_after_hint(
 
     Does not touch BKT state.
     """
-    key = (str(user_id), str(topic_id))
-    stored = _frustration_state.get(key)
+    uid = str(user_id)
+    key = (uid, str(topic_id))
+    topic_stored = _frustration_state.get(key)
+    user_stored = _frustration_by_user.get(uid)
+    stored = topic_stored or user_stored
     if stored is None:
         return
 
     if interaction_score is not None and float(interaction_score) >= FRUSTRATION_SUCCESS_CLEAR_THRESHOLD:
-        del _frustration_state[key]
-        return
-
-    if stored.level == "high":
-        new_raw = 0.50
+        next_signal = None
+    elif stored.level == "high":
+        next_signal = FrustrationSignal(
+            frustration_score=0.50,
+            level=_frustration_level_from_score(0.50),
+            source=stored.source,
+            recorded_at=_utc_now(),
+        )
     elif stored.level == "medium":
-        new_raw = 0.25
+        next_signal = FrustrationSignal(
+            frustration_score=0.25,
+            level=_frustration_level_from_score(0.25),
+            source=stored.source,
+            recorded_at=_utc_now(),
+        )
     else:
-        del _frustration_state[key]
-        return
+        next_signal = None
 
-    _frustration_state[key] = FrustrationSignal(
-        frustration_score=new_raw,
-        level=_frustration_level_from_score(new_raw),
-        source=stored.source,
-        recorded_at=_utc_now(),
-    )
+    if topic_stored is not None:
+        if next_signal is None:
+            _frustration_state.pop(key, None)
+        else:
+            _frustration_state[key] = next_signal
+    if user_stored is not None:
+        if next_signal is None:
+            _frustration_by_user.pop(uid, None)
+        else:
+            _frustration_by_user[uid] = next_signal
 
 
 def build_frustration_audit_fields(

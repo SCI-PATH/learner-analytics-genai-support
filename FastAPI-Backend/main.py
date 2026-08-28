@@ -2221,23 +2221,13 @@ def analytics_student_profile(
     distractor_counts = live_distractor_counts
     distractor_source = "question_engine_live" if live_distractor_counts else "none"
 
+    # Quiz-only: P(L) on this page is from assessment-submit, not Socrates chat.
     topic_ids_for_bkt = sorted(
         {
-            str(row.get("topic_id") or "")
+            str(row.get("topic_id") or "").strip()
             for row in live_attempts
-            if row.get("topic_id")
-        }
-        | {
-            tid
-            for (u, tid), state in engine.student_state.items()
-            if u == str(user_id)
-            and isinstance(state, dict)
-            and int(state.get("attempts", 0)) > 0
-        }
-        | {
-            tid
-            for (u, tid), vals in _signal_history.items()
-            if u == str(user_id) and vals
+            if str(row.get("topic_id") or "").strip()
+            and str(row.get("topic_id") or "").strip().upper() != "USER"
         }
     )
 

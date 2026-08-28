@@ -403,7 +403,7 @@ def insert_frustration_cue(record: dict[str, Any]) -> dict[str, Any]:
     """
     params = (
         _clip(record.get("user_id") or record.get("learner_id"), 64),
-        _clip(record.get("topic_id"), 64),
+        _clip(record.get("topic_id") or "USER", 64),
         float(record.get("frustration_score") or 0.0),
         _clip(record.get("source"), 50) or "engagement_module",
         recorded_at,

@@ -385,7 +385,7 @@ def insert_tutor_turn(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def insert_frustration_cue(record: dict[str, Any]) -> dict[str, Any]:
-    """Insert one engagement frustration cue."""
+    """Insert one per-learner engagement frustration cue (no topic column)."""
     if not postgres_configured():
         return {"ok": False, "skipped": True, "reason": "DATABASE_URL is not set in .env."}
     if psycopg is None:
@@ -395,16 +395,14 @@ def insert_frustration_cue(record: dict[str, Any]) -> dict[str, Any]:
     sql = f"""
         INSERT INTO {FRUSTRATION_CUES_TABLE} (
             learner_id,
-            topic_id,
             frustration_score,
             source,
             recorded_at
-        ) VALUES (%s, %s, %s, %s, COALESCE(%s, NOW()))
+        ) VALUES (%s, %s, %s, COALESCE(%s, NOW()))
         RETURNING cue_id, recorded_at, created_at
     """
     params = (
         _clip(record.get("user_id") or record.get("learner_id"), 64),
-        _clip(record.get("topic_id") or "USER", 64),
         float(record.get("frustration_score") or 0.0),
         _clip(record.get("source"), 50) or "engagement_module",
         recorded_at,

@@ -24,6 +24,7 @@ FRUSTRATION_CUES_TABLE = "learner_analytics.frustration_cues"
 SHARED_CLASSES_TABLE = "shared.classes"
 SHARED_CLASS_ENROLLMENTS_TABLE = "shared.class_enrollments"
 SHARED_TOPICS_TABLE = "shared.topics"
+SHARED_LEARNERS_TABLE = "shared.learners"
 
 
 def _database_url() -> Optional[str]:
@@ -768,6 +769,36 @@ def fetch_topic_ids_for_grade(grade_level: int) -> list[str]:
                 return [str(row[0]) for row in cur.fetchall() if row and row[0]]
     except Exception:
         return []
+
+
+def fetch_learner_grade_level(learner_id: str) -> Optional[int]:
+    """Grade for one learner from ``shared.learners``, if present."""
+    if not postgres_configured() or psycopg is None:
+        return None
+    lid = str(learner_id or "").strip()
+    if not lid:
+        return None
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT grade_level
+                    FROM {SHARED_LEARNERS_TABLE}
+                    WHERE learner_id = %s OR account_user_id = %s
+                    LIMIT 1
+                    """,
+                    (lid, lid),
+                )
+                row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        grade = int(row[0])
+        if grade < 6 or grade > 9:
+            return None
+        return grade
+    except Exception:
+        return None
 
 
 def learner_in_class(learner_id: str, class_code: str) -> bool:

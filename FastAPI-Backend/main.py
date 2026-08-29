@@ -48,6 +48,7 @@ from postgres_store import (
     fetch_topic_ids_for_grade,
     fetch_tutor_turns_for_learner,
     fetch_tutor_turns_for_learners,
+    fetch_learner_grade_level,
     insert_assessment_attempt,
     insert_frustration_cue,
     insert_tutor_turn,
@@ -891,6 +892,15 @@ class TutorHintAutoTopicRequest(BaseModel):
         None,
         description="Optional topic id override. If omitted, server infers topic from question text.",
     )
+    grade: Optional[int] = Field(
+        None,
+        ge=6,
+        le=9,
+        description=(
+            "Student grade (6–9). When set, auto topic routing only considers "
+            "skills for that grade (e.g. G6_*)."
+        ),
+    )
     conversation_history: Optional[list[ChatTurn]] = Field(
         None,
         description="Earlier turns for continuity (same semantics as TutorHintRequest)",
@@ -1362,6 +1372,9 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
         if req.conversation_history
         else None
     )
+    grade = req.grade
+    if grade is None:
+        grade = fetch_learner_grade_level(req.user_id)
     result = generate_socratic_hint_auto_topic(
         user_id=req.user_id,
         student_answer=req.student_answer,
@@ -1369,6 +1382,7 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
         conversation_history=hist,
         context_k=req.context_k,
         persona_id=req.persona_id,
+        grade=grade,
     )
     if result.get("success"):
         score = result.get("interaction_score_effective")
@@ -1595,8 +1609,9 @@ def _store_frustration_cue(
     }
     _persist_event("frustration_cue", cue_record)
     postgres_cue = insert_frustration_cue(cue_record)
+    db_ok = bool(postgres_cue.get("ok")) or bool(postgres_cue.get("skipped"))
     return {
-        "success": True,
+        "success": db_ok,
         "user_id": user_id,
         "topic_id": stored_topic,
         "frustration_score": signal.frustration_score,
@@ -1607,6 +1622,14 @@ def _store_frustration_cue(
         "effective_floor": 0.2,
         "used_by": ["/tutor/hint", "/tutor/hint-auto-topic"],
         "postgres": postgres_cue,
+        **(
+            {}
+            if db_ok
+            else {
+                "error": postgres_cue.get("error")
+                or "frustration cue was not written to Postgres",
+            }
+        ),
     }
 
 

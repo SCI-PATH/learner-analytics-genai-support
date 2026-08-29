@@ -328,6 +328,25 @@ _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
         "living thing", "non living", "alive", "not alive", "grow", "breathe",
         "reproduce", "reproduction", "respond", "sensitive",
     ],
+    "G6_C1_ORG_DIFF": [
+        "heterotroph",
+        "heterotrophic",
+        "heterotrophs",
+        "autotroph",
+        "autotrophic",
+        "autotrophs",
+        "make their own food",
+        "cannot make food",
+    ],
+    "G6_C10_FOO_NUTR": [
+        "heterotroph",
+        "heterotrophic",
+        "autotroph",
+        "autotrophic",
+        "herbivore",
+        "carnivore",
+        "omnivore",
+    ],
     "G7_C1_PLA_CLASSIF": ["monocot", "dicot", "monocots", "dicots"],
     "G7_C12_BIO_SYSTEMS": [
         "stomach", "digestive", "digestion", "digestive system",
@@ -338,6 +357,9 @@ _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
     "G7_C11_SOU_PROPAG": ["sound wave", "frequency", "amplitude", "pitch"],
     "G6_C8_ELE_CONDINS": ["conductor", "insulator", "rubber wire"],
 }
+
+# Per-student farm score key (not a curriculum skill).
+USER_LEVEL_FRUSTRATION_TOPIC = "USER"
 
 
 @dataclass
@@ -440,11 +462,13 @@ def ensure_gaming_frustration_cue(
     session_id: Optional[str] = None,
 ) -> Optional["FrustrationSignal"]:
     """
-    If no in-memory cue exists for this learner+topic, pull Component 3's GET API.
+    If no in-memory cue exists for this learner, pull Component 3's GET API.
 
-    Fail-open: a down gaming backend must not block tutor turns.
+    Farm frustration is per-student (not per curriculum skill), so cues are
+    stored under ``USER``. Fail-open: a down gaming backend must not block tutor turns.
     """
-    stored = _get_frustration_signal(user_id, topic_id)
+    del topic_id  # curriculum skill is unused — farm score is user-level
+    stored = _get_frustration_signal(user_id, USER_LEVEL_FRUSTRATION_TOPIC)
     if stored is not None:
         return stored
     try:
@@ -457,7 +481,7 @@ def ensure_gaming_frustration_cue(
         return None
     signal = upsert_frustration_signal(
         user_id=user_id,
-        topic_id=topic_id,
+        topic_id=USER_LEVEL_FRUSTRATION_TOPIC,
         frustration_score=float(snapshot["frustration_score"]),
         source=str(snapshot.get("source") or "gaming_service_get"),
     )
@@ -467,7 +491,7 @@ def ensure_gaming_frustration_cue(
         insert_frustration_cue(
             {
                 "user_id": str(user_id),
-                "topic_id": str(topic_id),
+                "topic_id": USER_LEVEL_FRUSTRATION_TOPIC,
                 "frustration_score": float(signal.frustration_score),
                 "source": str(signal.source),
                 "recorded_at": signal.recorded_at.isoformat(),
@@ -1291,17 +1315,51 @@ def _score_text_for_topic(text: str, topic_id: str) -> int:
         if hits:
             score += hits + 2
             continue
-        # Fuzzy stem only for longer tokens (avoids what/heat/cell-style 4-letter collisions).
-        if len(kw_low) < 5:
+        # Fuzzy stem only for longer tokens. Use 7+ chars so
+        # "heterotrophic" does not collide with "heterogeneous".
+        if len(kw_low) < 7:
             continue
-        kw_prefix = kw_low[:5]
+        kw_prefix = kw_low[:7]
         for w in words:
-            if len(w) < 5:
+            if len(w) < 7:
                 continue
-            if w.startswith(kw_prefix) or kw_low.startswith(w[:5]):
+            if w.startswith(kw_prefix) or kw_low.startswith(w[:7]):
                 score += 1
                 break
     return score
+
+
+def _normalize_grade_level(grade: Optional[Any]) -> Optional[int]:
+    if grade is None or grade == "":
+        return None
+    try:
+        value = int(grade)
+    except (TypeError, ValueError):
+        return None
+    if value < 6 or value > 9:
+        return None
+    return value
+
+
+def _fallback_topic_for_grade(grade: Optional[int]) -> str:
+    g = _normalize_grade_level(grade)
+    if g is None:
+        return FALLBACK_TOPIC_ID
+    prefix = f"G{g}_"
+    for topic_id in _TOPIC_KEYWORDS:
+        if str(topic_id).startswith(prefix):
+            return str(topic_id)
+    return FALLBACK_TOPIC_ID
+
+
+def _topic_ids_for_inference(grade: Optional[int] = None) -> list[str]:
+    """Curriculum skills eligible for auto-routing (optionally grade-scoped)."""
+    g = _normalize_grade_level(grade)
+    if g is None:
+        return list(_TOPIC_KEYWORDS.keys())
+    prefix = f"G{g}_"
+    scoped = [tid for tid in _TOPIC_KEYWORDS if str(tid).startswith(prefix)]
+    return scoped or list(_TOPIC_KEYWORDS.keys())
 
 
 _TOPIC_SWITCH_INTENT_RE = re.compile(
@@ -1313,12 +1371,16 @@ _TOPIC_SWITCH_INTENT_RE = re.compile(
 )
 
 
-def _rank_topics_for_text(text: str) -> list[tuple[str, int]]:
+def _rank_topics_for_text(
+    text: str,
+    *,
+    grade: Optional[int] = None,
+) -> list[tuple[str, int]]:
     """Return curriculum topics ranked by evidence in the current learner message."""
     normalized = re.sub(r"[^\w\s]", " ", str(text or "").strip().lower())
     ranked = [
         (topic_id, _score_text_for_topic(normalized, topic_id))
-        for topic_id in _TOPIC_KEYWORDS
+        for topic_id in _topic_ids_for_inference(grade)
     ]
     return sorted(ranked, key=lambda item: item[1], reverse=True)
 
@@ -1328,6 +1390,8 @@ def _resolve_topic_for_turn(
     student_answer: str,
     topic_id: Optional[str],
     conversation_history: Optional[list[dict[str, Any]]],
+    *,
+    grade: Optional[int] = None,
 ) -> tuple[str, Literal["explicit", "inferred", "continued", "switched"]]:
     """
     Resolve the lesson without allowing short Socratic answers to reroute the chat.
@@ -1336,6 +1400,7 @@ def _resolve_topic_for_turn(
     resolved topic remains sticky unless the learner clearly asks a new,
     confidently classifiable science question. An empty history starts a fresh
     inference so user-level state does not permanently lock later conversations.
+    When ``grade`` is set (6–9), inference only considers that grade's skills.
     """
     if topic_id:
         return normalize_topic_id(topic_id), "explicit"
@@ -1345,11 +1410,12 @@ def _resolve_topic_for_turn(
     inferred_topic = infer_topic_id_from_question(
         student_answer,
         conversation_history=conversation_history,
+        grade=grade,
     )
     if not prior_topic or not conversation_history:
         return inferred_topic, "inferred"
 
-    ranked = _rank_topics_for_text(student_answer)
+    ranked = _rank_topics_for_text(student_answer, grade=grade)
     best_topic, best_score = ranked[0] if ranked else (inferred_topic, 0)
     second_score = ranked[1][1] if len(ranked) > 1 else 0
     has_switch_intent = bool(_TOPIC_SWITCH_INTENT_RE.search(student_answer))
@@ -1415,17 +1481,20 @@ def infer_topic_id_from_question(
     student_answer: str,
     *,
     conversation_history: Optional[list[dict[str, Any]]] = None,
-    fallback_topic_id: str = FALLBACK_TOPIC_ID,
+    fallback_topic_id: Optional[str] = None,
+    grade: Optional[int] = None,
 ) -> str:
     """
     Infer topic_id from natural language using the expanded ``_TOPIC_KEYWORDS`` catalog.
 
     Scores the latest student message; for short follow-ups (e.g. \"why?\", \"yes\"),
     also scores against the most recent prior user turn.
+    When ``grade`` is 6–9, only skills for that grade are considered.
     """
+    fallback = fallback_topic_id or _fallback_topic_for_grade(grade)
     text = student_answer.strip().lower()
     if not text:
-        return fallback_topic_id
+        return fallback
 
     text = re.sub(r"[^\w\s]", " ", text)
     scoring_segments = [text]
@@ -1433,9 +1502,9 @@ def infer_topic_id_from_question(
     if prior and len(text.split()) <= 4:
         scoring_segments.append(re.sub(r"[^\w\s]", " ", prior.strip().lower()))
 
-    best_topic = fallback_topic_id
+    best_topic = fallback
     best_score = 0
-    for topic_id in _TOPIC_KEYWORDS:
+    for topic_id in _topic_ids_for_inference(grade):
         score = sum(_score_text_for_topic(segment, topic_id) for segment in scoring_segments)
         if score > best_score:
             best_score = score
@@ -1686,6 +1755,7 @@ def generate_socratic_hint_auto_topic(
     bkt: Optional[ScienceBKT] = None,
     context_k: int = 4,
     persona_id: Optional[str] = None,
+    grade: Optional[int] = None,
 ) -> dict[str, Any]:
     """
     Generate a hint when only free-text question/answer is provided.
@@ -1695,13 +1765,17 @@ def generate_socratic_hint_auto_topic(
     learner clearly asks a confidently classifiable question about another topic.
     When the resolved topic changes, prior chat history is not sent to the LLM.
 
+    ``grade`` (6–9) scopes auto-routing to that grade's skills so a Grade 6
+    question cannot lock onto a Grade 9 skill id.
+
     Acknowledgment / gratitude and standalone greetings short-circuit before
     topic inference and RAG.
     """
+    grade_level = _normalize_grade_level(grade)
     sticky_for_cue = (
         topic_id
         or _last_resolved_topic_by_user.get(str(user_id))
-        or FALLBACK_TOPIC_ID
+        or _fallback_topic_for_grade(grade_level)
     )
     ensure_gaming_frustration_cue(user_id, normalize_topic_id(sticky_for_cue))
 
@@ -1720,7 +1794,7 @@ def generate_socratic_hint_auto_topic(
         sticky_topic = (
             topic_id
             or _last_resolved_topic_by_user.get(str(user_id))
-            or FALLBACK_TOPIC_ID
+            or _fallback_topic_for_grade(grade_level)
         )
         response = _acknowledgment_closure_response(
             user_id=user_id,
@@ -1739,6 +1813,7 @@ def generate_socratic_hint_auto_topic(
         student_answer,
         topic_id,
         conversation_history,
+        grade=grade_level,
     )
     scoped_history, topic_changed = _scope_history_for_topic(
         user_id,
@@ -1759,6 +1834,8 @@ def generate_socratic_hint_auto_topic(
     result["topic_routing"] = topic_routing
     result["topic_changed"] = topic_changed
     result["history_turns_sent"] = len(scoped_history or [])
+    if grade_level is not None:
+        result["grade_scoped"] = grade_level
     return result
 
 

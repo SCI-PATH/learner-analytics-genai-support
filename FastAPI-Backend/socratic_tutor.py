@@ -491,7 +491,6 @@ def ensure_gaming_frustration_cue(
         insert_frustration_cue(
             {
                 "user_id": str(user_id),
-                "topic_id": USER_LEVEL_FRUSTRATION_TOPIC,
                 "frustration_score": float(signal.frustration_score),
                 "source": str(signal.source),
                 "recorded_at": signal.recorded_at.isoformat(),

@@ -475,15 +475,14 @@ def _hydrate_live_state_from_db() -> None:
             _record_assessment_attempt(payload)
         elif event_type == "frustration_cue":
             uid = str(payload.get("user_id") or "")
-            topic = str(payload.get("topic_id") or "")
             score = float(payload.get("frustration_score") or 0.0)
             source = str(payload.get("source") or "engagement_module")
-            if not uid or not topic:
+            if not uid:
                 continue
             recorded_at_raw = payload.get("recorded_at")
             signal = upsert_frustration_signal(
                 user_id=uid,
-                topic_id=topic,
+                topic_id=USER_LEVEL_FRUSTRATION_TOPIC,
                 frustration_score=score,
                 source=source,
                 recorded_at=(
@@ -492,7 +491,9 @@ def _hydrate_live_state_from_db() -> None:
                     else None
                 ),
             )
-            _frustration_history[(uid, topic)].append(float(signal.frustration_score))
+            _frustration_history[(uid, USER_LEVEL_FRUSTRATION_TOPIC)].append(
+                float(signal.frustration_score)
+            )
         elif event_type == "chat_turn":
             uid = str(payload.get("user_id") or "")
             topic = str(payload.get("topic_id") or "")
@@ -1041,20 +1042,19 @@ class QuizBktSnapshotRequest(BaseModel):
     )
 
 
-# Farm / homepage cues are per student, not per curriculum skill.
+# Farm / homepage cues are per student (no curriculum topic column in Postgres).
 USER_LEVEL_FRUSTRATION_TOPIC = "USER"
 
 
 class FrustrationCueSubmitRequest(BaseModel):
     """Engagement module cue for sentiment-aware tutor tone adaptation."""
 
-    user_id: str = Field(..., description="Student identifier")
+    user_id: str = Field(..., description="Student identifier (shared.learners.learner_id)")
     topic_id: Optional[str] = Field(
-        default=USER_LEVEL_FRUSTRATION_TOPIC,
+        default=None,
         description=(
-            "Curriculum skill id when the cue is lesson-specific. "
-            "Omit or send USER for a per-student farm/homepage score "
-            "(gaming does not compute frustration per topic)."
+            "Deprecated / ignored. Frustration is stored per learner only "
+            "(no topic_id column on frustration_cues)."
         ),
     )
     frustration_score: float = Field(
@@ -1085,8 +1085,8 @@ class GamingFrustrationSyncRequest(BaseModel):
 
     user_id: str = Field(..., description="Same studentId used at farm launch")
     topic_id: Optional[str] = Field(
-        default=USER_LEVEL_FRUSTRATION_TOPIC,
-        description="Optional skill id. Defaults to USER (per-student farm score).",
+        default=None,
+        description="Deprecated / ignored. Frustration is stored per learner only.",
     )
     session_id: Optional[str] = Field(
         None,
@@ -1592,17 +1592,19 @@ def _store_frustration_cue(
     frustration_score: float,
     source: str,
 ) -> dict[str, Any]:
-    stored_topic = str(topic_id or "").strip() or USER_LEVEL_FRUSTRATION_TOPIC
+    # In-memory tone key stays user-level; Postgres has no topic_id column.
+    del topic_id
     signal = upsert_frustration_signal(
         user_id=user_id,
-        topic_id=stored_topic,
+        topic_id=USER_LEVEL_FRUSTRATION_TOPIC,
         frustration_score=frustration_score,
         source=source,
     )
-    _frustration_history[(str(user_id), stored_topic)].append(float(signal.frustration_score))
+    _frustration_history[(str(user_id), USER_LEVEL_FRUSTRATION_TOPIC)].append(
+        float(signal.frustration_score)
+    )
     cue_record = {
         "user_id": str(user_id),
-        "topic_id": stored_topic,
         "frustration_score": float(signal.frustration_score),
         "source": str(signal.source),
         "recorded_at": signal.recorded_at.isoformat(),
@@ -1613,7 +1615,6 @@ def _store_frustration_cue(
     return {
         "success": db_ok,
         "user_id": user_id,
-        "topic_id": stored_topic,
         "frustration_score": signal.frustration_score,
         "frustration_level": signal.level,
         "source": signal.source,
@@ -1644,11 +1645,11 @@ def engagement_frustration_cue(req: FrustrationCueSubmitRequest) -> dict[str, An
     Record an engagement/frustration signal for sentiment-aware tutoring.
 
     This does not update BKT mastery. The next tutor turn for this student
-    uses the cue for tone (per-user, even when ``topic_id`` is ``USER``).
+    uses the cue for tone. Cues are stored per learner (no topic_id column).
     """
     return _store_frustration_cue(
         user_id=req.user_id,
-        topic_id=req.topic_id,
+        topic_id=None,
         frustration_score=req.frustration_score,
         source=req.source,
     )
@@ -1700,13 +1701,12 @@ def engagement_sync_gaming_frustration(req: GamingFrustrationSyncRequest) -> dic
         return {
             "success": False,
             "user_id": req.user_id,
-            "topic_id": req.topic_id,
             "gaming_api_base": gaming_api_base(),
             "error": "gaming_frustration_unavailable",
         }
     stored = _store_frustration_cue(
         user_id=req.user_id,
-        topic_id=req.topic_id,
+        topic_id=None,
         frustration_score=float(snapshot["frustration_score"]),
         source=str(snapshot.get("source") or "gaming_service_get"),
     )

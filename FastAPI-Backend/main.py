@@ -37,6 +37,7 @@ if _groq_from_file and not os.environ.get("GROQ_API_KEY", "").strip():
 
 from bkt_engine import ScienceBKT
 from postgres_store import (
+    fetch_assessment_attempt_summary,
     fetch_assessment_attempts_for_learner,
     fetch_assessment_attempts_for_learners,
     fetch_class_metadata,
@@ -2201,6 +2202,89 @@ def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
         if key in scope:
             payload[key] = scope[key]
     return payload
+
+
+def _memory_quiz_attempt_summary(user_id: str) -> dict[str, Any]:
+    """In-memory fallback when Postgres is not configured."""
+    rows = list(_assessment_attempts_by_user.get(str(user_id), []))
+    topic_ids = sorted(
+        {
+            str(row.get("topic_id") or "").strip()
+            for row in rows
+            if str(row.get("topic_id") or "").strip()
+            and str(row.get("topic_id") or "").strip().upper() != "USER"
+        }
+    )
+    return {"attempt_count": len(rows), "topic_ids": topic_ids}
+
+
+def _student_mastery_summary_payload(user_id: str) -> dict[str, Any]:
+    """Hub-card stats only: quiz attempt count + BKT bands. No focus/tutor/frustration."""
+    uid = str(user_id)
+    if postgres_configured():
+        stats = fetch_assessment_attempt_summary(uid)
+    else:
+        stats = _memory_quiz_attempt_summary(uid)
+    topic_ids = list(stats.get("topic_ids") or [])
+    quiz_attempts = int(stats.get("attempt_count") or 0)
+
+    engine = get_shared_bkt_engine()
+    if topic_ids:
+        if not engine.skill_map:
+            engine.initialize_skills()
+        engine.prefetch_learner_states(uid)
+
+    values: list[float] = []
+    mastered = 0
+    learning = 0
+    at_risk = 0
+    for topic_id in topic_ids:
+        try:
+            p_l = float(engine.get_current_mastery_probability(uid, topic_id))
+        except ValueError:
+            continue
+        values.append(p_l)
+        category = _mastery_category_from_pl(p_l)
+        if category == "advanced":
+            mastered += 1
+        elif category == "intermediate":
+            learning += 1
+        else:
+            at_risk += 1
+
+    overall = round((sum(values) / len(values)) * 100) if values else None
+    return {
+        "success": True,
+        "mode": "live_state",
+        "user_id": uid,
+        "overall_mastery": overall,
+        "skills_practised": len(values),
+        "mastered": mastered,
+        "learning": learning,
+        "at_risk": at_risk,
+        "quiz_attempts": quiz_attempts,
+    }
+
+
+@app.get(
+    "/api/v1/analytics/student-mastery-summary/{user_id}",
+    tags=["Analytics"],
+    summary="Lightweight mastery pills for the student home card",
+)
+def analytics_student_mastery_summary(
+    user_id: str = ApiPath(
+        ...,
+        description="Learner ID — same `user_id` used on assessment-submit.",
+        examples=["user_001"],
+    ),
+) -> dict[str, Any]:
+    """
+    Fast subset of ``student-profile`` for the home hub card.
+
+    Returns quiz attempt count and mastered / learning / needs-help bands from
+    BKT P(L). Skips focus areas, tutor turns, frustration, and distractors.
+    """
+    return _student_mastery_summary_payload(str(user_id))
 
 
 @app.get(

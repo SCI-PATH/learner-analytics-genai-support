@@ -928,6 +928,48 @@ _ASSESSMENT_ATTEMPT_SELECT = f"""
 """
 
 
+def fetch_assessment_attempt_summary(learner_id: str) -> dict[str, Any]:
+    """Cheap quiz stats for the student home mastery pills (one aggregate query)."""
+    empty = {"attempt_count": 0, "topic_ids": []}
+    if not postgres_configured() or psycopg is None:
+        return empty
+    lid = str(learner_id or "").strip()
+    if not lid:
+        return empty
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(*)::int,
+                        COALESCE(
+                            ARRAY_AGG(DISTINCT topic_id) FILTER (
+                                WHERE topic_id IS NOT NULL
+                                  AND BTRIM(topic_id) <> ''
+                                  AND UPPER(BTRIM(topic_id)) <> 'USER'
+                            ),
+                            ARRAY[]::text[]
+                        )
+                    FROM {ASSESSMENT_ATTEMPTS_TABLE}
+                    WHERE learner_id = %s
+                    """,
+                    (lid,),
+                )
+                row = cur.fetchone()
+    except Exception:
+        return empty
+    if not row:
+        return empty
+    count, topic_ids = row
+    topics = [
+        str(tid).strip()
+        for tid in (topic_ids or [])
+        if tid and str(tid).strip() and str(tid).strip().upper() != "USER"
+    ]
+    return {"attempt_count": int(count or 0), "topic_ids": sorted(set(topics))}
+
+
 def fetch_assessment_attempts_for_learner(
     learner_id: str,
     *,

@@ -2422,7 +2422,22 @@ def analytics_student_profile(
         if isinstance(x.get("interaction_score"), (int, float))
     ]
     critical_confusion_turns = [
-        row for row in chat_tail if bool(row.get("critical_confusion")) is True
+        {
+            "topic_id": row.get("topic_id"),
+            "student_message": row.get("student_message"),
+            "tutor_hint": row.get("tutor_hint"),
+            "interaction_score": row.get("interaction_score"),
+            "critical_confusion": True,
+            "timestamp": row.get("timestamp"),
+            "persona_id": row.get("persona_id"),
+            "hint_mode": row.get("hint_mode"),
+        }
+        for row in engagement_tail
+        if bool(row.get("critical_confusion")) is True
+        or (
+            isinstance(row.get("interaction_score"), (int, float))
+            and float(row["interaction_score"]) < 0.30
+        )
     ]
     focus_areas, focus_meta = _build_student_focus_areas(str(user_id))
     topics_covered = len({str(r.get("topic_id")) for r in live_attempts if r.get("topic_id")})

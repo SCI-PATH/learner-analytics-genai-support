@@ -384,13 +384,23 @@ def insert_tutor_turn(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+FRUSTRATION_CUE_DEDUPE_SECONDS = 10
+
+
 def insert_frustration_cue(record: dict[str, Any]) -> dict[str, Any]:
-    """Insert one per-learner engagement frustration cue (no topic column)."""
+    """Insert one per-learner engagement frustration cue (no topic column).
+
+    Near-duplicate posts (same learner, source, and score within a few seconds)
+    are skipped. Farm Ask Socrates and /tutor used to write the same cue 3–4 times.
+    """
     if not postgres_configured():
         return {"ok": False, "skipped": True, "reason": "DATABASE_URL is not set in .env."}
     if psycopg is None:
         return {"ok": False, "error": "psycopg is not installed."}
 
+    learner_id = _clip(record.get("user_id") or record.get("learner_id"), 64)
+    score = float(record.get("frustration_score") or 0.0)
+    source = _clip(record.get("source"), 50) or "engagement_module"
     recorded_at = record.get("recorded_at")
     sql = f"""
         INSERT INTO {FRUSTRATION_CUES_TABLE} (
@@ -398,14 +408,28 @@ def insert_frustration_cue(record: dict[str, Any]) -> dict[str, Any]:
             frustration_score,
             source,
             recorded_at
-        ) VALUES (%s, %s, %s, COALESCE(%s, NOW()))
+        )
+        SELECT %s, %s, %s, COALESCE(%s, NOW())
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM {FRUSTRATION_CUES_TABLE}
+            WHERE learner_id = %s
+              AND source = %s
+              AND ABS(frustration_score - %s) < 0.0001
+              AND COALESCE(recorded_at, created_at)
+                    > NOW() - (%s * INTERVAL '1 second')
+        )
         RETURNING cue_id, recorded_at, created_at
     """
     params = (
-        _clip(record.get("user_id") or record.get("learner_id"), 64),
-        float(record.get("frustration_score") or 0.0),
-        _clip(record.get("source"), 50) or "engagement_module",
+        learner_id,
+        score,
+        source,
         recorded_at,
+        learner_id,
+        source,
+        score,
+        FRUSTRATION_CUE_DEDUPE_SECONDS,
     )
     try:
         with _connect() as conn:
@@ -416,7 +440,15 @@ def insert_frustration_cue(record: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
-    cue_id, recorded_at_out, created_at = row if row else (None, None, None)
+    if row is None:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "duplicate_recent",
+            "table": FRUSTRATION_CUES_TABLE,
+        }
+
+    cue_id, recorded_at_out, created_at = row
     return {
         "ok": True,
         "cue_id": int(cue_id) if cue_id is not None else None,

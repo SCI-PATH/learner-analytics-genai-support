@@ -259,7 +259,18 @@ class LocalScienceKnowledgeBase:
     def retrieve_context(self, topic_id: str, k: int = 5) -> dict[str, Any]:
         """Return syllabus excerpts for a curriculum topic_id (metadata-filtered when possible)."""
         topic_id = normalize_topic_id(topic_id)
-        col = self._ensure_collection_loaded()
+        try:
+            col = self._ensure_collection_loaded()
+        except Exception:
+            return {
+                "topic_id": topic_id,
+                "query_used": None,
+                "chunks_returned": 0,
+                "contexts": [],
+                "facts_text": "",
+                "skipped": True,
+                "skip_reason": "index_missing",
+            }
         grade = _grade_from_topic_id(topic_id)
         boost = _TOPIC_QUERY_BOOST.get(
             topic_id,

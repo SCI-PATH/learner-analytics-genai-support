@@ -24,8 +24,9 @@ import time
 from typing import Any, Literal, Optional
 
 from dotenv import dotenv_values, load_dotenv
-from fastapi import FastAPI, Path as ApiPath, Query
+from fastapi import FastAPI, Path as ApiPath, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -131,11 +132,37 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://gaming-service-dex5.onrender.com",
     ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _cors_headers_for_request(request: Request) -> dict[str, str]:
+    origin = (request.headers.get("origin") or "").strip()
+    if not origin:
+        return {}
+    return {
+        "access-control-allow-origin": origin,
+        "access-control-allow-credentials": "true",
+        "vary": "Origin",
+    }
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+    """Unhandled tutor/RAG crashes must still carry CORS or Chrome reports 'CORS error'."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": str(exc) or exc.__class__.__name__,
+        },
+        headers=_cors_headers_for_request(request),
+    )
 
 # Lightweight in-memory analytics signals for at-risk trend checks.
 _signal_history: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=20))
@@ -1317,14 +1344,23 @@ def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
         if req.conversation_history
         else None
     )
-    result = generate_socratic_hint(
-        user_id=req.user_id,
-        topic_id=req.topic_id,
-        student_answer=req.student_answer,
-        conversation_history=hist,
-        context_k=req.context_k,
-        persona_id=req.persona_id,
-    )
+    try:
+        result = generate_socratic_hint(
+            user_id=req.user_id,
+            topic_id=req.topic_id,
+            student_answer=req.student_answer,
+            conversation_history=hist,
+            context_k=req.context_k,
+            persona_id=req.persona_id,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "user_id": req.user_id,
+            "topic_id": req.topic_id,
+            "hint_text": "",
+            "error": str(exc) or exc.__class__.__name__,
+        }
     if result.get("success"):
         score = result.get("interaction_score_effective")
         score_val = float(score) if isinstance(score, (int, float)) else None
@@ -1376,15 +1412,23 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
     grade = req.grade
     if grade is None:
         grade = fetch_learner_grade_level(req.user_id)
-    result = generate_socratic_hint_auto_topic(
-        user_id=req.user_id,
-        student_answer=req.student_answer,
-        topic_id=req.topic_id,
-        conversation_history=hist,
-        context_k=req.context_k,
-        persona_id=req.persona_id,
-        grade=grade,
-    )
+    try:
+        result = generate_socratic_hint_auto_topic(
+            user_id=req.user_id,
+            student_answer=req.student_answer,
+            topic_id=req.topic_id,
+            conversation_history=hist,
+            context_k=req.context_k,
+            persona_id=req.persona_id,
+            grade=grade,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "user_id": req.user_id,
+            "hint_text": "",
+            "error": str(exc) or exc.__class__.__name__,
+        }
     if result.get("success"):
         score = result.get("interaction_score_effective")
         score_val = float(score) if isinstance(score, (int, float)) else None

@@ -24,8 +24,9 @@ import time
 from typing import Any, Literal, Optional
 
 from dotenv import dotenv_values, load_dotenv
-from fastapi import FastAPI, Path as ApiPath, Query
+from fastapi import FastAPI, Path as ApiPath, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +38,7 @@ if _groq_from_file and not os.environ.get("GROQ_API_KEY", "").strip():
 
 from bkt_engine import ScienceBKT
 from postgres_store import (
+    fetch_assessment_attempt_summary,
     fetch_assessment_attempts_for_learner,
     fetch_assessment_attempts_for_learners,
     fetch_class_metadata,
@@ -130,11 +132,37 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://gaming-service-dex5.onrender.com",
     ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _cors_headers_for_request(request: Request) -> dict[str, str]:
+    origin = (request.headers.get("origin") or "").strip()
+    if not origin:
+        return {}
+    return {
+        "access-control-allow-origin": origin,
+        "access-control-allow-credentials": "true",
+        "vary": "Origin",
+    }
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+    """Unhandled tutor/RAG crashes must still carry CORS or Chrome reports 'CORS error'."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": str(exc) or exc.__class__.__name__,
+        },
+        headers=_cors_headers_for_request(request),
+    )
 
 # Lightweight in-memory analytics signals for at-risk trend checks.
 _signal_history: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=20))
@@ -1316,14 +1344,23 @@ def tutor_hint(req: TutorHintRequest) -> dict[str, Any]:
         if req.conversation_history
         else None
     )
-    result = generate_socratic_hint(
-        user_id=req.user_id,
-        topic_id=req.topic_id,
-        student_answer=req.student_answer,
-        conversation_history=hist,
-        context_k=req.context_k,
-        persona_id=req.persona_id,
-    )
+    try:
+        result = generate_socratic_hint(
+            user_id=req.user_id,
+            topic_id=req.topic_id,
+            student_answer=req.student_answer,
+            conversation_history=hist,
+            context_k=req.context_k,
+            persona_id=req.persona_id,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "user_id": req.user_id,
+            "topic_id": req.topic_id,
+            "hint_text": "",
+            "error": str(exc) or exc.__class__.__name__,
+        }
     if result.get("success"):
         score = result.get("interaction_score_effective")
         score_val = float(score) if isinstance(score, (int, float)) else None
@@ -1375,15 +1412,23 @@ def tutor_hint_auto_topic(req: TutorHintAutoTopicRequest) -> dict[str, Any]:
     grade = req.grade
     if grade is None:
         grade = fetch_learner_grade_level(req.user_id)
-    result = generate_socratic_hint_auto_topic(
-        user_id=req.user_id,
-        student_answer=req.student_answer,
-        topic_id=req.topic_id,
-        conversation_history=hist,
-        context_k=req.context_k,
-        persona_id=req.persona_id,
-        grade=grade,
-    )
+    try:
+        result = generate_socratic_hint_auto_topic(
+            user_id=req.user_id,
+            student_answer=req.student_answer,
+            topic_id=req.topic_id,
+            conversation_history=hist,
+            context_k=req.context_k,
+            persona_id=req.persona_id,
+            grade=grade,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "user_id": req.user_id,
+            "hint_text": "",
+            "error": str(exc) or exc.__class__.__name__,
+        }
     if result.get("success"):
         score = result.get("interaction_score_effective")
         score_val = float(score) if isinstance(score, (int, float)) else None
@@ -2203,6 +2248,89 @@ def mastery_matrix(req: MasteryMatrixRequest) -> dict[str, Any]:
     return payload
 
 
+def _memory_quiz_attempt_summary(user_id: str) -> dict[str, Any]:
+    """In-memory fallback when Postgres is not configured."""
+    rows = list(_assessment_attempts_by_user.get(str(user_id), []))
+    topic_ids = sorted(
+        {
+            str(row.get("topic_id") or "").strip()
+            for row in rows
+            if str(row.get("topic_id") or "").strip()
+            and str(row.get("topic_id") or "").strip().upper() != "USER"
+        }
+    )
+    return {"attempt_count": len(rows), "topic_ids": topic_ids}
+
+
+def _student_mastery_summary_payload(user_id: str) -> dict[str, Any]:
+    """Hub-card stats only: quiz attempt count + BKT bands. No focus/tutor/frustration."""
+    uid = str(user_id)
+    if postgres_configured():
+        stats = fetch_assessment_attempt_summary(uid)
+    else:
+        stats = _memory_quiz_attempt_summary(uid)
+    topic_ids = list(stats.get("topic_ids") or [])
+    quiz_attempts = int(stats.get("attempt_count") or 0)
+
+    engine = get_shared_bkt_engine()
+    if topic_ids:
+        if not engine.skill_map:
+            engine.initialize_skills()
+        engine.prefetch_learner_states(uid)
+
+    values: list[float] = []
+    mastered = 0
+    learning = 0
+    at_risk = 0
+    for topic_id in topic_ids:
+        try:
+            p_l = float(engine.get_current_mastery_probability(uid, topic_id))
+        except ValueError:
+            continue
+        values.append(p_l)
+        category = _mastery_category_from_pl(p_l)
+        if category == "advanced":
+            mastered += 1
+        elif category == "intermediate":
+            learning += 1
+        else:
+            at_risk += 1
+
+    overall = round((sum(values) / len(values)) * 100) if values else None
+    return {
+        "success": True,
+        "mode": "live_state",
+        "user_id": uid,
+        "overall_mastery": overall,
+        "skills_practised": len(values),
+        "mastered": mastered,
+        "learning": learning,
+        "at_risk": at_risk,
+        "quiz_attempts": quiz_attempts,
+    }
+
+
+@app.get(
+    "/api/v1/analytics/student-mastery-summary/{user_id}",
+    tags=["Analytics"],
+    summary="Lightweight mastery pills for the student home card",
+)
+def analytics_student_mastery_summary(
+    user_id: str = ApiPath(
+        ...,
+        description="Learner ID — same `user_id` used on assessment-submit.",
+        examples=["user_001"],
+    ),
+) -> dict[str, Any]:
+    """
+    Fast subset of ``student-profile`` for the home hub card.
+
+    Returns quiz attempt count and mastered / learning / needs-help bands from
+    BKT P(L). Skips focus areas, tutor turns, frustration, and distractors.
+    """
+    return _student_mastery_summary_payload(str(user_id))
+
+
 @app.get(
     "/api/v1/analytics/student-profile/{user_id}",
     tags=["Analytics"],
@@ -2338,7 +2466,22 @@ def analytics_student_profile(
         if isinstance(x.get("interaction_score"), (int, float))
     ]
     critical_confusion_turns = [
-        row for row in chat_tail if bool(row.get("critical_confusion")) is True
+        {
+            "topic_id": row.get("topic_id"),
+            "student_message": row.get("student_message"),
+            "tutor_hint": row.get("tutor_hint"),
+            "interaction_score": row.get("interaction_score"),
+            "critical_confusion": True,
+            "timestamp": row.get("timestamp"),
+            "persona_id": row.get("persona_id"),
+            "hint_mode": row.get("hint_mode"),
+        }
+        for row in engagement_tail
+        if bool(row.get("critical_confusion")) is True
+        or (
+            isinstance(row.get("interaction_score"), (int, float))
+            and float(row["interaction_score"]) < 0.30
+        )
     ]
     focus_areas, focus_meta = _build_student_focus_areas(str(user_id))
     topics_covered = len({str(r.get("topic_id")) for r in live_attempts if r.get("topic_id")})

@@ -1574,7 +1574,18 @@ def generate_socratic_hint(
     topic_id = normalize_topic_id(topic_id)
     engine = bkt or _get_default_bkt()
     mastery_before = float(engine.get_current_mastery_probability(user_id, topic_id))
-    kb = retrieve_context(topic_id, k=context_k)
+    try:
+        kb = retrieve_context(topic_id, k=context_k)
+    except Exception:
+        kb = {
+            "topic_id": topic_id,
+            "query_used": None,
+            "chunks_returned": 0,
+            "contexts": [],
+            "facts_text": "",
+            "skipped": True,
+            "skip_reason": "rag_unavailable",
+        }
     facts = (kb.get("facts_text") or "").strip()
     source_summary = _retrieval_source_summary(kb)
     mode = _hint_mode(mastery_before)

@@ -98,53 +98,53 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
     "practical_encourager": {
         "scaffold": (
             "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5).\n"
-            "- One everyday comparison in a single short sentence (kitchen, sport, weather).\n"
-            "- Warm and simple; withhold the fact they asked for — no extra teaching.\n"
+            "- If they just answered you: verdict first (Yes that's right / Not quite / Partly).\n"
+            "- Then one everyday comparison (kitchen, sport, weather). Withhold extra teaching.\n"
             "- One small real-world prediction question."
         ),
         "balanced": (
             "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Mirror one student phrase, then one short contrast (this vs that).\n"
+            "- If they just answered you: verdict first, then one short contrast (this vs that).\n"
             "- Do not re-teach the whole topic.\n"
             "- One which-situation question."
         ),
         "nudge": (
             "PERSONA × MODE: Practical Encourager · NUDGE (P(L) > 0.8).\n"
-            "- Skip recap. One everyday \"what would you notice?\" question.\n"
+            "- If they just answered you: one-word verdict, then one \"what would you notice?\" question.\n"
             "- No analogy chains."
         ),
     },
     "analytical_coach": {
         "scaffold": (
             "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5).\n"
-            "- hint_text MUST be exactly 3 numbered CLUES (not the finished answer), each ≤12 words.\n"
-            "- Withhold the formula, atom recipe, and final name.\n"
+            "- If they just answered you: first line is a short verdict, then 3 numbered clues.\n"
+            "- The 3 lines must NOT state the why / what / how they asked for.\n"
             "- Then ONE short check question on its own last line."
         ),
         "balanced": (
             "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Exactly 3 numbered steps that contrast two paths or one variable.\n"
-            "- Each step ≤12 words. Then ONE question: which change flips the outcome?"
+            "- If they just answered you: verdict line first, then 3 numbered contrast clues.\n"
+            "- Do NOT name the finished rule. Each step ≤12 words. Then ONE question."
         ),
         "nudge": (
             "PERSONA × MODE: Analytical Coach · NUDGE (P(L) > 0.8).\n"
-            "- Exactly 3 numbered prediction steps (if we change X → then Y → then Z).\n"
-            "- Each step ≤12 words. Then ONE \"what happens next?\" question."
+            "- If they just answered you: verdict line first, then 3 numbered prediction clues.\n"
+            "- Still withhold the textbook sentence. Then ONE \"what happens next?\" question."
         ),
     },
     "curious_explorer": {
         "scaffold": (
             "PERSONA × MODE: Curious Explorer · SCAFFOLD (P(L) < 0.5).\n"
-            "- One clue, then one \"what might be going on?\" question.\n"
-            "- No extra puzzle setup."
+            "- If they just answered you: verdict first, then one clue.\n"
+            "- Then one \"what might be going on?\" question. No extra puzzle setup."
         ),
         "balanced": (
             "PERSONA × MODE: Curious Explorer · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Nod to their idea in a few words, then one \"what if\" that splits two close ideas."
+            "- If they just answered you: verdict first, then one \"what if\" that splits two close ideas."
         ),
         "nudge": (
             "PERSONA × MODE: Curious Explorer · NUDGE (P(L) > 0.8).\n"
-            "- One \"suppose … then what changes?\" question. No extra scene-setting."
+            "- If they just answered you: verdict first, then one \"suppose … then what changes?\" question."
         ),
     },
 }
@@ -163,23 +163,32 @@ _SOCRATIC_GUARDRAILS = """
 4. FOLLOW-UP = SCIENCE, NOT READING: One closing question about what happens in the real world.
    BAD: \"What might the text suggest happens when the wet stick touches the wire?\"
    GOOD: \"If the stick is wet, can electricity still travel along it?\"
-5. NO DIRECT ANSWERS: Never state the rule they asked you to teach. If they ask how to
-   identify / what happens / what is X made of, give a clue and a prediction question.
-   They must still say the answer.
+5. SOCRATIC — NEVER GIVE THE ANSWER (every persona, every mode, every question):
+   You are not a textbook. The student must arrive at the fact by answering YOUR question.
+   If a marker could tick THEIR question from your hint_text alone, it is too direct.
+   This covers why / what / how / when / where / which / need / used for / define —
+   including Analytical Coach's 3 steps (those are riddles, not three facts).
+   BAD: \"Fish use gills to take oxygen from water.\"
    BAD: \"Acidic solutions turn blue litmus paper red.\"
-   GOOD: \"Litmus comes in two colours and acids change only one of them. If you dip
-   blue litmus in lemon juice, do you expect it to stay blue or change?\"
-   Also never dump formulas, atom counts, or \"the correct term is\".
+   BAD: \"1. Sodium is in table salt  2. It helps nerves  3. It balances body fluids\"
+   GOOD: \"Fish stay underwater and cannot use lungs like you. What gas in the water
+   must reach their blood?\"
 6. LAYOUT: Practical Encourager and Curious Explorer — no lists, bullets, or mini-lessons.
    Analytical Coach ONLY — exactly three numbered lines (`1.` `2.` `3.`), each ≤12 simple
-   words, then ONE short question on the next line. No extra lecture around the list.
+   words, then ONE short question on the next line. If they just answered you, put ONE
+   short verdict line BEFORE the numbered list (not instead of it).
 7. ONE QUESTION: hint_text contains exactly ONE question mark. Never a second question
    (no \"and why?\", no \"what else?\", no stacked ?). The follow-up is the last line only.
 8. BREVITY: Other personas: 1–2 short sentences + that question (hard cap 50 words).
-   Analytical Coach: 3 short steps + one question (about 40 words total).
+   Analytical Coach: optional verdict + 3 short steps + one question (about 45 words total).
 9. VARIETY: Do NOT open with \"Great job!\", \"Good start!\", \"That's a great start!\",
-   or \"Excellent question!\".
-10. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
+   or \"Excellent question!\". When they answered your last question, DO open with a
+   verdict: \"Yes — that's right.\", \"Not quite.\", or \"Partly right.\"
+10. VALIDATE ATTEMPTS BEFORE MOVING ON: If their latest message answers YOUR previous
+   follow-up, sentence 1 must say whether it is correct, not quite, or partly right.
+   Only then give the next clue and one new question. If they are wrong, do not dump
+   the correct fact — say not quite, give a smaller clue, and ask again.
+11. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
 """.strip()
 
 # Few-shot demonstrations: native tutor voice (no meta \"text/excerpt\" references).
@@ -188,7 +197,7 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "I don't get conductors vs insulators.",
-        "hint": "A metal spoon lets electricity through; rubber does not. Which kitchen object would let electricity through?",
+        "hint": "Some kitchen tools let electricity pass and some block it. Would a metal spoon or a rubber spatula be safer near a socket?",
     },
     {
         "persona": "practical_encourager",
@@ -206,7 +215,7 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "practical_encourager",
         "mode": "balanced",
         "student": "Renewable and non-renewable—are they the same thing?",
-        "hint": "Both give energy, but sunlight keeps coming back and coal does not. Which one can run out?",
+        "hint": "One kind of energy keeps arriving every day; the other is dug up and gone. Which one can run out?",
     },
     {
         "persona": "practical_encourager",
@@ -222,21 +231,39 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     },
     {
         "persona": "analytical_coach",
+        "mode": "scaffold",
+        "student": "What is sodium mainly used for?",
+        "hint": "1. Think of white grains by the pepper.\n2. Your body uses this metal daily.\n3. Too much of it makes you thirsty.\nWhat kitchen crystals hold a lot of it?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "scaffold",
+        "student": "Why do fish need gills?",
+        "hint": "1. They stay under water all the time.\n2. You use lungs for air.\n3. Water holds a gas their blood needs.\nWhat would they run out of if that pickup stopped?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
+        "student": "Why do fish need gills?",
+        "hint": "Fish never come up for air the way we do. If they could not pull a gas out of the water, what would they run out of?",
+    },
+    {
+        "persona": "analytical_coach",
         "mode": "balanced",
         "student": "Series and parallel circuits confuse me.",
-        "hint": "1. Series is one path only.\n2. Parallel splits into branches.\n3. A break stops a series path.\nIf one series lamp dies, what happens to the path?",
+        "hint": "1. One wiring has a single path.\n2. The other splits like a fork.\n3. A break on a single path stops the flow.\nIf one lamp on the single path dies, what happens to the rest?",
     },
     {
         "persona": "analytical_coach",
         "mode": "nudge",
         "student": "Density is mass over volume, right?",
-        "hint": "1. Density is mass compared with space.\n2. Keep mass the same.\n3. Make the volume bigger.\nDoes density go up or down?",
+        "hint": "1. Keep the amount of stuff the same.\n2. Spread it into a bigger space.\n3. Each bit of space now holds less.\nDoes density go up or down?",
     },
     {
         "persona": "curious_explorer",
         "mode": "scaffold",
         "student": "Why do living things need nutrition?",
-        "hint": "Living things need materials they cannot make on their own. What happens if they stop taking those in?",
+        "hint": "Bodies keep using stuff up, like a phone using charge. What happens if nothing new is taken in?",
     },
     {
         "persona": "curious_explorer",
@@ -248,19 +275,19 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "curious_explorer",
         "mode": "nudge",
         "student": "Refraction is when light bends.",
-        "hint": "Light bends when it changes speed between materials. If it goes from air into water, does it bend toward the normal or away?",
+        "hint": "It changes speed when it enters a new material. If it goes from air into water, does it bend toward the normal or away?",
     },
     {
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "I can't tell vertebrates from invertebrates.",
-        "hint": "Vertebrates have a backbone; invertebrates do not. Does a spider have a backbone?",
+        "hint": "One group has a chain of bones down the back; the other does not. If you pressed a spider's back, would you feel that chain?",
     },
     {
         "persona": "analytical_coach",
         "mode": "balanced",
         "student": "Monocots vs dicots?",
-        "hint": "1. Look at the leaf veins.\n2. Monocots run side by side.\n3. Dicots look like a net.\nWhich vein pattern do you see?",
+        "hint": "1. Think of grass versus a mango leaf.\n2. One has veins like tram lines.\n3. The other looks like a spider web.\nWhich leaf matches grass?",
     },
     {
         "persona": "curious_explorer",
@@ -272,13 +299,13 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "analytical_coach",
         "mode": "scaffold",
         "student": "Earth's layers are confusing.",
-        "hint": "1. You stand on the thin crust.\n2. The mantle sits under it.\n3. The core is in the centre.\nWhat sits directly under the crust?",
+        "hint": "1. Think of Earth like a peach.\n2. You live on the thin outer skin.\n3. A thick juicy part sits under that skin.\nWhat do we call that thick part?",
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "Evaporation and boiling—same thing?",
-        "hint": "Boiling happens throughout the liquid; evaporation happens at the surface. On a windy lake, which would you notice first?",
+        "hint": "One happens only at the top of the water; the other can bubble all through it. On a windy lake, which would you notice first?",
     },
     {
         "persona": "curious_explorer",
@@ -291,6 +318,48 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "mode": "nudge",
         "student": "If I used a wet wooden stick to poke a live wire, what would the textbook say could happen?",
         "hint": "Dry wood usually blocks electricity, but water can make a path. If the stick is wet, can electricity still travel along it?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "balanced",
+        "kind": "attempt",
+        "student": "oxygen",
+        "hint": "Yes — oxygen is right. If that gas never reached their blood, what would happen when they try to swim?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
+        "kind": "attempt",
+        "student": "carbon dioxide",
+        "hint": "Not quite — think of the gas you breathe in, not the one you breathe out. Which gas is that?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "balanced",
+        "kind": "attempt",
+        "student": "they breathe water",
+        "hint": "Partly right — they take something FROM the water, not the water itself. What gas is dissolved in it?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "scaffold",
+        "kind": "attempt",
+        "student": "table salt",
+        "hint": "Yes — table salt is right.\n1. Those white crystals are in snacks too.\n2. Extra of them makes you thirsty.\n3. Your body still uses this metal.\nWhich snack job would change if you ate a lot of them?",
+    },
+    {
+        "persona": "analytical_coach",
+        "mode": "scaffold",
+        "kind": "attempt",
+        "student": "it's a medicine",
+        "hint": "Not quite — think kitchen, not a hospital.\n1. White grains sit by the pepper.\n2. You sprinkle this at meals.\n3. Too much makes you thirsty.\nWhat kitchen crystals hold a lot of it?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "nudge",
+        "kind": "attempt",
+        "student": "is it oxygen?",
+        "hint": "Yes — oxygen is right. If gills could not pick that gas from water, what would the fish run out of?",
     },
 ]
 
@@ -921,8 +990,8 @@ _GREETING_OPENERS: dict[str, str] = {
         "How can I help you today — what topic would you like to work on?"
     ),
     "analytical_coach": (
-        "Hello. I can walk you through any Grade 6–9 science concept step by step. "
-        "Which topic should we start with?"
+        "Hello. I help you figure out Grade 6–9 science by asking questions, not by "
+        "handing over the answer. Which topic should we start with?"
     ),
     "curious_explorer": (
         "Hey! I can investigate a Grade 6–9 science idea with you. "
@@ -961,16 +1030,30 @@ def _is_help_intent(student_answer: str) -> bool:
 
 
 _ANSWER_SEEKING_RE = re.compile(
-    r"\b(?:"
-    r"what\s+(?:is|are|does|do)|"
-    r"how\s+do\s+(?:we|you|i)|"
-    r"how\s+can\s+(?:we|you|i)|"
-    r"how\s+to|"
-    r"how\s+(?:would|could)\s+(?:we|you|i)|"
-    r"define|identify|explain|"
-    r"made\s+(?:up\s+)?of|composed\s+of|"
-    r"difference\s+between"
-    r")\b",
+    r"(?:"
+    r"\bwhy\b|"
+    r"\bwhat\s+(?:is|are|does|do|did|happens|happened|makes|causes|would|can|could)\b|"
+    r"\bwhat'?s\b|"
+    r"\bhow\s+(?:do|does|did|can|could|would|should|to|is|are|come)\b|"
+    r"\bwhen\s+(?:do|does|did|is|are|can|would)\b|"
+    r"\bwhere\s+(?:do|does|did|is|are|can)\b|"
+    r"\bwhich\s+(?:one|ones|is|are|do|does)\b|"
+    r"\bwho\s+(?:do|does|is|are)\b|"
+    r"\bdefine\b|\bidentify\b|\bexplain\b|\bdescribe\b|"
+    r"\btell\s+me\b|"
+    r"\bmade\s+(?:up\s+)?of\b|\bcomposed\s+of\b|"
+    r"\bused\s+for\b|\bmainly\s+used\b|"
+    r"\bfunction\s+of\b|\bpurpose\s+of\b|"
+    r"\bdifference\s+between\b|"
+    r"\bcan\s+you\s+(?:explain|tell|say|teach|show)\b|"
+    r"\b(?:do|does|did)\s+\w+\s+need\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_HYPOTHESIS_RE = re.compile(
+    r"^\s*(?:is\s+it(?:\s+because)?|is\s+that|could\s+it(?:\s+be)?|maybe|perhaps|"
+    r"i\s+think|does\s+that\s+mean|so\s+is\s+it|am\s+i\s+right)",
     re.IGNORECASE,
 )
 
@@ -982,7 +1065,36 @@ def _is_answer_seeking_intent(student_answer: str) -> bool:
     plain = _plain_student_text(student_answer)
     if not plain:
         return False
-    return bool(_ANSWER_SEEKING_RE.search(plain))
+    if _HYPOTHESIS_RE.search(plain):
+        return False
+    if _ANSWER_SEEKING_RE.search(plain):
+        return True
+    return "?" in plain
+
+
+_STRONG_QUESTION_RE = re.compile(
+    r"\b(?:why|what|how|explain|define|describe|tell me|used for|"
+    r"function of|purpose of|difference between)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_attempt_intent(student_answer: str, last_follow_up: str) -> bool:
+    """True when they replied to the previous tutor question with an answer or guess."""
+    if not (last_follow_up or "").strip():
+        return False
+    if _is_help_intent(student_answer):
+        return False
+    plain = _plain_student_text(student_answer)
+    if not plain:
+        return False
+    if _HYPOTHESIS_RE.search(plain):
+        return True
+    if _STRONG_QUESTION_RE.search(plain) and (
+        "?" in plain or _ANSWER_SEEKING_RE.search(plain)
+    ):
+        return False
+    return True
 
 
 def _last_tutor_follow_up(turns: Optional[list[dict[str, Any]]]) -> str:
@@ -1232,6 +1344,7 @@ def _format_few_shot_examples(
     max_examples: int = 3,
     help_intent: bool = False,
     answer_seeking: bool = False,
+    attempt: bool = False,
 ) -> str:
     """Compile few-shot demonstrations with emphasis on the active persona × mode."""
     ranked: list[tuple[int, int, dict[str, str]]] = []
@@ -1249,6 +1362,12 @@ def _format_few_shot_examples(
             score -= 4
         if answer_seeking and _is_answer_seeking_intent(example["student"]):
             score += 6
+        elif attempt and example.get("kind") == "attempt":
+            score += 8
+        elif not attempt and example.get("kind") == "attempt":
+            score -= 4
+        elif attempt and _is_answer_seeking_intent(example["student"]):
+            score -= 4
         ranked.append((score, idx, example))
     ranked.sort(key=lambda item: (-item[0], item[1]))
 
@@ -1270,23 +1389,29 @@ def _build_system_prompt(
     *,
     help_intent: bool = False,
     answer_seeking: bool = False,
+    attempt: bool = False,
 ) -> str:
     persona_label = _PERSONA_LABELS[persona]
     state_config = _PERSONA_STATE_MATRIX[persona][mode]
     few_shots = _format_few_shot_examples(
-        persona, mode, help_intent=help_intent, answer_seeking=answer_seeking
+        persona,
+        mode,
+        help_intent=help_intent,
+        answer_seeking=answer_seeking,
+        attempt=attempt,
     )
 
     help_block = ""
     if answer_seeking:
         help_block = (
             "--- ANSWER-SEEKING TURN (mandatory) ---\n"
-            "The student asked to be taught a fact (what / how do we / identify). "
-            "Do NOT write that fact. No colour-change rule, no formula, no definition. "
-            "Give one clue, then one prediction question they can try.\n"
-            "BAD: \"Acidic solutions turn blue litmus paper red.\"\n"
-            "GOOD: \"Litmus comes in two colours and acids change only one of them. "
-            "If you dip blue litmus in lemon juice, do you expect it to stay blue or change?\"\n\n"
+            "The student asked a science question (why / what / how / need / used for / …). "
+            "Do NOT write the answer. No function, no colour-change rule, no formula, no uses list. "
+            "Analytical Coach: 3 numbered riddles a marker could NOT tick, then one question.\n"
+            "BAD: \"Fish use gills to take oxygen from water.\"\n"
+            "BAD: \"1. Sodium is in table salt 2. nerves 3. fluids\"\n"
+            "GOOD: \"Fish stay underwater and cannot use lungs like you. What gas in the "
+            "water must reach their blood?\"\n\n"
         )
     elif help_intent:
         help_block = (
@@ -1298,6 +1423,19 @@ def _build_system_prompt(
             "NEVER write 'you thought', 'you mentioned', 'you said', or 'you picked' unless "
             "those words appear on a Student line. Tutor lines are your own previous words.\n\n"
         )
+    elif attempt:
+        help_block = (
+            "--- ATTEMPT TURN (mandatory) ---\n"
+            "The latest student message answers YOUR previous follow-up. It is an attempt, "
+            "not a new request to be taught.\n"
+            "Sentence 1 MUST be a verdict, before any new clue or question:\n"
+            "- Correct: \"Yes — that's right.\" (you may echo 2–4 of their words)\n"
+            "- Wrong: \"Not quite.\" Then a smaller clue. Do NOT then state the correct fact.\n"
+            "- Partial: \"Partly right — you got [their correct bit].\"\n"
+            "Only AFTER the verdict: one next Socratic step and ONE new question.\n"
+            "Analytical Coach: verdict on its own first line, then 3 numbered clues, then the question.\n"
+            "NEVER skip the verdict and jump to a new topic.\n\n"
+        )
     else:
         help_block = (
             "--- Attribution ---\n"
@@ -1306,8 +1444,9 @@ def _build_system_prompt(
         )
 
     return (
-        f"You are **{persona_label}**, a Grade 6–9 science tutor. Keep every reply "
-        f"short enough to read in one glance.\n"
+        f"You are **{persona_label}**, a Grade 6–9 SOCRATIC science tutor. "
+        f"Students learn by answering YOUR question. You never hand them the finished fact. "
+        f"Keep every reply short enough to read in one glance.\n"
         f"Active state: persona_id={persona}, hint_mode={mode}.\n"
         f"Private curriculum notes in the user message are for YOUR eyes only. Coach in your "
         f"own simple voice. Never call them \"text\", \"excerpts\", or \"the textbook\". "
@@ -1317,12 +1456,13 @@ def _build_system_prompt(
         f"{state_config}\n\n"
         f"{help_block}"
         f"--- Conversational continuity ---\n"
-        f"- THREAD: If they actually answered your last question, nod in a few words, then hint once.\n"
+        f"- THREAD: If they answered your last question, verdict first (right / not quite / partly), "
+        f"then one next clue. Never skip the verdict.\n"
         f"- MEMORY: Echo at most 2–4 words from a Student line only.\n"
         f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or pages.\n"
         f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
         f"  High frustration: even shorter, even kinder, still one idea.\n\n"
-        f"{_correction_protocol(persona)}"
+        f"{_correction_protocol(persona, answer_seeking=answer_seeking, attempt=attempt)}"
         f"--- Few-shot length/voice samples (copy LENGTH, not facts) ---\n"
         f"{few_shots}\n\n"
         f"--- interaction_score (JSON field only; never shown in hint_text) ---\n"
@@ -1332,11 +1472,34 @@ def _build_system_prompt(
         f"  • 0.0–0.35: wrong, vague, or major misconception\n"
         f"  • 0.36–0.77: partial / uncertain (not mastered)\n"
         f"  • 0.78–1.0: clearly correct and curriculum-aligned\n\n"
-        f"{_output_format_block(persona)}"
+        f"{_output_format_block(persona, answer_seeking=answer_seeking, attempt=attempt)}"
     )
 
 
-def _correction_protocol(persona: str) -> str:
+def _correction_protocol(
+    persona: str, *, answer_seeking: bool = False, attempt: bool = False
+) -> str:
+    if answer_seeking:
+        return (
+            "--- Correction-first protocol (answer-seeking) ---\n"
+            "They asked a science question. Do not answer it. Clues / riddles only, "
+            "then one prediction question.\n\n"
+        )
+    if attempt:
+        if persona == "analytical_coach":
+            return (
+                "--- Correction-first protocol (attempt · Analytical Coach) ---\n"
+                "Line 1 (not numbered): Yes that's right / Not quite / Partly right.\n"
+                "Then 3 numbered clues for the NEXT small step (or a smaller version of "
+                "the same question if they were wrong). End with one question.\n"
+                "If wrong, do not write the correct fact in the 3 lines.\n\n"
+            )
+        return (
+            "--- Correction-first protocol (attempt) ---\n"
+            "Sentence 1 is the verdict. Sentence 2 is one clue. Then one question. "
+            "If they are right: confirm their words, then the next small step.\n"
+            "If they are wrong: say not quite, contrast, ask again — do not dump the answer.\n\n"
+        )
     if persona == "analytical_coach":
         return (
             "--- Correction-first protocol (Analytical Coach) ---\n"
@@ -1350,19 +1513,60 @@ def _correction_protocol(persona: str) -> str:
     )
 
 
-def _output_format_block(persona: str) -> str:
+def _output_format_block(
+    persona: str, *, answer_seeking: bool = False, attempt: bool = False
+) -> str:
     if persona == "analytical_coach":
-        example = (
-            '{"hint_text":"1. Light hits the leaf.\\n2. The leaf traps that energy.\\n'
-            '3. Air and water help make sugar.\\nWhere does the air\'s part come from?",'
-            '"interaction_score":0.35}'
-        )
+        if attempt:
+            example = (
+                '{"hint_text":"Yes — table salt is right.\\n'
+                '1. Those white crystals are in snacks too.\\n'
+                '2. Extra of them makes you thirsty.\\n'
+                '3. Your body still uses this metal.\\n'
+                'Which snack job would change if you ate a lot of them?","interaction_score":0.82}'
+            )
+            shape = (
+                "hint_text for Analytical Coach on an ATTEMPT:\n"
+                "Short verdict line\n1. short clue\n2. short clue\n3. short clue\nOne short question?\n"
+            )
+        elif answer_seeking:
+            example = (
+                '{"hint_text":"1. Think of white grains by the pepper.\\n'
+                '2. Your body uses this metal daily.\\n'
+                '3. Too much of it makes you thirsty.\\n'
+                'What kitchen crystals hold a lot of it?","interaction_score":0.28}'
+            )
+            shape = (
+                "hint_text for Analytical Coach MUST look like 3 numbered RIDDLES (not answer facts):\n"
+                "1. short clue\n2. short clue\n3. short clue\nOne short question?\n"
+            )
+        else:
+            example = (
+                '{"hint_text":"1. Think of white grains by the pepper.\\n'
+                '2. Your body uses this metal daily.\\n'
+                '3. Too much of it makes you thirsty.\\n'
+                'What kitchen crystals hold a lot of it?","interaction_score":0.35}'
+            )
+            shape = (
+                "hint_text for Analytical Coach MUST look like 3 numbered RIDDLES (not answer facts):\n"
+                "1. short clue\n2. short clue\n3. short clue\nOne short question?\n"
+            )
         return (
             "--- OUTPUT FORMAT (mandatory) ---\n"
             "Return ONLY a single JSON object with \"hint_text\" and \"interaction_score\".\n"
-            "hint_text for Analytical Coach MUST look like:\n"
-            "1. short step\n2. short step\n3. short step\nOne short question?\n"
+            f"{shape}"
+            "Do NOT write uses, definitions, or identification rules in the 3 lines.\n"
             f"Example: {example}\n"
+            "If interaction_score is missing or not a number, the server skips dialogue-derived "
+            "BKT logic for this turn—always include a valid number.\n"
+        )
+    if attempt:
+        return (
+            "--- OUTPUT FORMAT (mandatory) ---\n"
+            "Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
+            "verdict + one clue + one question, ≤50 words) and \"interaction_score\" (number). "
+            'Example: {"hint_text":"Yes — oxygen is right. If that gas never reached their blood, '
+            'what would happen when they try to swim?","interaction_score":0.84}\n'
             "If interaction_score is missing or not a number, the server skips dialogue-derived "
             "BKT logic for this turn—always include a valid number.\n"
         )
@@ -1370,8 +1574,8 @@ def _output_format_block(persona: str) -> str:
         "--- OUTPUT FORMAT (mandatory) ---\n"
         "Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
         "1–2 short sentences + one question, ≤50 words) and \"interaction_score\" (number). "
-        'Example: {"hint_text":"A metal spoon lets electricity through; rubber does not. '
-        'Which kitchen object would let electricity through?","interaction_score":0.35}\n'
+        'Example: {"hint_text":"You already meet this metal at meals. What white crystals '
+        'next to pepper hold a lot of it?","interaction_score":0.35}\n'
         "If interaction_score is missing or not a number, the server skips dialogue-derived "
         "BKT logic for this turn—always include a valid number.\n"
     )
@@ -1425,15 +1629,47 @@ _INLINE_STEP_RE = re.compile(
 )
 
 
-def _reply_constraints(persona: str) -> str:
+def _reply_constraints(
+    persona: str, *, answer_seeking: bool = False, attempt: bool = False
+) -> str:
+    socratic = (
+        " NEVER state the finished science fact "
+        "(no 'fish use gills to take oxygen from water', no uses lists, no colour-change rules)."
+    )
+    extra = (
+        " The 3 lines must be riddles, NOT the why/what/how they asked for."
+        if answer_seeking and persona == "analytical_coach"
+        else (
+            " Do not state the fact they asked for."
+            if answer_seeking
+            else (
+                " First sentence MUST be Yes that's right / Not quite / Partly right. "
+                "Then one next clue. Do not skip the verdict. If wrong, do not dump the correct fact."
+                if attempt
+                else ""
+            )
+        )
+    )
     if persona == "analytical_coach":
+        lead = (
+            "Reply constraints: Analytical Coach. First line is a short verdict, then "
+            "exactly 3 numbered clues (`1.` `2.` `3.`), each ≤12 Grade 6–9 words, "
+            "then ONE short question on the last line."
+            if attempt
+            else (
+                "Reply constraints: Analytical Coach. Exactly 3 numbered clues (`1.` `2.` `3.`), "
+                "each ≤12 Grade 6–9 words, then ONE short question on the last line."
+            )
+        )
+        return f"{lead}{socratic}{extra}\n"
+    if attempt:
         return (
-            "Reply constraints: Analytical Coach. Exactly 3 numbered steps (`1.` `2.` `3.`), "
-            "each ≤12 Grade 6–9 words, then ONE short question on the last line.\n"
+            "Reply constraints: Grade 6–9 reading level. Verdict + one clue + one question. "
+            f"Max 50 words. No lists.{socratic}{extra}\n"
         )
     return (
         "Reply constraints: Grade 6–9 reading level. 1–2 short sentences + one question. "
-        "Max 50 words. No lists, no numbered steps, no extra explanation.\n"
+        f"Max 50 words. No lists.{socratic}{extra}\n"
     )
 
 
@@ -1856,8 +2092,9 @@ def generate_socratic_hint(
     frustration_audit = build_frustration_audit_fields(frustration_resolution, resolved_persona)
 
     help_intent = _is_help_intent(student_answer)
-    answer_seeking = _is_answer_seeking_intent(student_answer)
     last_follow_up = _last_tutor_follow_up(conversation_history)
+    attempt = _is_attempt_intent(student_answer, last_follow_up)
+    answer_seeking = (not attempt) and _is_answer_seeking_intent(student_answer)
     hist_block = _format_conversation_history(conversation_history)
     thread_prefix = (
         f"Recent conversation (older messages first; Student vs Tutor labels are exact):\n{hist_block}\n\n"
@@ -1875,9 +2112,21 @@ def generate_socratic_hint(
         )
     elif answer_seeking:
         help_prefix = (
-            "TURN TYPE: answer_seeking. They asked how/what/identify. "
-            "Do NOT state the textbook rule (no \"acids turn blue litmus red\", no formulas). "
-            "One clue + one prediction question. interaction_score 0.20–0.40.\n\n"
+            "TURN TYPE: answer_seeking. They asked a science question "
+            "(why / what / how / need / used for / …). "
+            "Do NOT answer it "
+            "(no \"fish use gills to take oxygen from water\", "
+            "no \"acids turn blue litmus red\", no \"sodium is in salt / nerves / fluids\"). "
+            "Clues + one prediction question only. interaction_score 0.20–0.40.\n\n"
+        )
+    elif attempt:
+        help_prefix = (
+            "TURN TYPE: attempt. They replied to your previous follow-up:\n"
+            f"\"{last_follow_up}\"\n"
+            "Validate that reply FIRST. Sentence 1 must be Yes that's right / Not quite / "
+            "Partly right. Only then give one next Socratic step and one new question. "
+            "If wrong, do not dump the correct fact. Score clearly: correct usually ≥0.78; "
+            "wrong/vague usually ≤0.35.\n\n"
         )
     user_block = (
         f"topic_id: {topic_id}\n"
@@ -1891,12 +2140,16 @@ def generate_socratic_hint(
         f"{thread_prefix}"
         f"{help_prefix}"
         f"PRIVATE tutor curriculum notes (do NOT mention these notes, excerpts, or any "
-        f"textbook/source to the student; {source_summary}; may be partial):\n"
+        f"textbook/source to the student; {source_summary}; may be partial; "
+        f"{'use them to JUDGE this attempt and to know which fact to WITHHOLD' if attempt else 'use them only to know which fact to WITHHOLD'} "
+        f"— never copy the answer into hint_text):\n"
         f"{facts if facts else '[no curriculum notes retrieved]'}\n\n"
         f"Student's **latest** message (verbatim"
-        f"{'; HELP request, not a science answer' if help_intent else ''}):\n"
+        f"{'; HELP request, not a science answer' if help_intent else ''}"
+        f"{'; they asked a question — do not answer it' if answer_seeking else ''}"
+        f"{'; they answered your last follow-up — validate it first' if attempt else ''}):\n"
         f"{student_answer.strip() or '[empty]'}\n\n"
-        f"{_reply_constraints(resolved_persona)}"
+        f"{_reply_constraints(resolved_persona, answer_seeking=answer_seeking, attempt=attempt)}"
     )
 
     try:
@@ -1912,6 +2165,7 @@ def generate_socratic_hint(
                             tone_guidance,
                             help_intent=help_intent,
                             answer_seeking=answer_seeking,
+                            attempt=attempt,
                         )
                     ),
                     HumanMessage(content=user_block),

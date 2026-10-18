@@ -99,8 +99,8 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
         "scaffold": (
             "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5).\n"
             "- One everyday comparison in a single short sentence (kitchen, sport, weather).\n"
-            "- Warm and simple; no extra teaching after that comparison.\n"
-            "- One small real-world question."
+            "- Warm and simple; withhold the fact they asked for — no extra teaching.\n"
+            "- One small real-world prediction question."
         ),
         "balanced": (
             "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
@@ -117,9 +117,9 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
     "analytical_coach": {
         "scaffold": (
             "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5).\n"
-            "- hint_text MUST be exactly 3 numbered steps (cause → next → outcome), each ≤12 words.\n"
-            "- Then ONE short check question on its own last line.\n"
-            "- No extra paragraph before or after the steps."
+            "- hint_text MUST be exactly 3 numbered CLUES (not the finished answer), each ≤12 words.\n"
+            "- Withhold the formula, atom recipe, and final name.\n"
+            "- Then ONE short check question on its own last line."
         ),
         "balanced": (
             "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
@@ -163,8 +163,13 @@ _SOCRATIC_GUARDRAILS = """
 4. FOLLOW-UP = SCIENCE, NOT READING: One closing question about what happens in the real world.
    BAD: \"What might the text suggest happens when the wet stick touches the wire?\"
    GOOD: \"If the stick is wet, can electricity still travel along it?\"
-5. NO DIRECT ANSWERS: Never give the full definition, numeric result, or \"the correct term is\".
-   Hint only.
+5. NO DIRECT ANSWERS: Never state the rule they asked you to teach. If they ask how to
+   identify / what happens / what is X made of, give a clue and a prediction question.
+   They must still say the answer.
+   BAD: \"Acidic solutions turn blue litmus paper red.\"
+   GOOD: \"Litmus comes in two colours and acids change only one of them. If you dip
+   blue litmus in lemon juice, do you expect it to stay blue or change?\"
+   Also never dump formulas, atom counts, or \"the correct term is\".
 6. LAYOUT: Practical Encourager and Curious Explorer — no lists, bullets, or mini-lessons.
    Analytical Coach ONLY — exactly three numbered lines (`1.` `2.` `3.`), each ≤12 simple
    words, then ONE short question on the next line. No extra lecture around the list.
@@ -187,6 +192,18 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     },
     {
         "persona": "practical_encourager",
+        "mode": "scaffold",
+        "student": "Give me a hint",
+        "hint": "A sharp-smelling gas can come from rotting waste, not from a kitchen tap. Could a compost heap let that gas out?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
+        "student": "How do we identify an acid with litmus paper?",
+        "hint": "Litmus comes in two colours and acids change only one of them. If you dip blue litmus in lemon juice, do you expect it to stay blue or change?",
+    },
+    {
+        "persona": "practical_encourager",
         "mode": "balanced",
         "student": "Renewable and non-renewable—are they the same thing?",
         "hint": "Both give energy, but sunlight keeps coming back and coal does not. Which one can run out?",
@@ -200,8 +217,8 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     {
         "persona": "analytical_coach",
         "mode": "scaffold",
-        "student": "What is photosynthesis?",
-        "hint": "1. Light hits the leaf.\n2. The leaf traps that energy.\n3. Air and water help make sugar.\nWhere does the air's part come from?",
+        "student": "What is ammonia made up of?",
+        "hint": "1. It is a small gas molecule.\n2. Two kinds of atoms are joined.\n3. One kind is hydrogen.\nWhich other atom sits in the middle?",
     },
     {
         "persona": "analytical_coach",
@@ -821,7 +838,11 @@ def _format_conversation_history(
             continue
         if role not in ("user", "assistant"):
             continue
-        label = "Student" if role == "user" else "Tutor"
+        label = (
+            "Student (learner said this)"
+            if role == "user"
+            else "Tutor (YOU said this earlier — not the student's idea)"
+        )
         lines.append(f"{label}: {content[:max_chars_per_turn]}")
     return "\n".join(lines)
 
@@ -908,6 +929,79 @@ _GREETING_OPENERS: dict[str, str] = {
         "What topic should we start with?"
     ),
 }
+
+
+_HELP_INTENT_RE = re.compile(
+    r"^(?:"
+    r"(?:please\s+)?(?:give|show|tell)\s+me\s+(?:a\s+)?hint|"
+    r"hint(?:\s+please)?|"
+    r"(?:can|could|may)\s+i\s+(?:have|get)\s+(?:a\s+)?hint|"
+    r"i\s+need\s+(?:a\s+)?hint|"
+    r"(?:i['’]?m\s+|i\s+am\s+)?(?:so\s+|really\s+|still\s+)?"
+    r"(?:stuck|confused|lost)(?:\s+on this(?: step)?)?|"
+    r"help(?:\s+me)?(?:\s+please)?|"
+    r"idk|"
+    r"i\s+don['’]?t\s+(?:know|get|understand)(?:\s+it|\s+this)?"
+    r")[\s!.?…]*$",
+    re.IGNORECASE,
+)
+
+
+def _plain_student_text(text: str) -> str:
+    stripped = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", text or "")
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _is_help_intent(student_answer: str) -> bool:
+    """True for hint / stuck / idk chips with no extra science content."""
+    plain = _plain_student_text(student_answer)
+    if not plain:
+        return False
+    return bool(_HELP_INTENT_RE.match(plain))
+
+
+_ANSWER_SEEKING_RE = re.compile(
+    r"\b(?:"
+    r"what\s+(?:is|are|does|do)|"
+    r"how\s+do\s+(?:we|you|i)|"
+    r"how\s+can\s+(?:we|you|i)|"
+    r"how\s+to|"
+    r"how\s+(?:would|could)\s+(?:we|you|i)|"
+    r"define|identify|explain|"
+    r"made\s+(?:up\s+)?of|composed\s+of|"
+    r"difference\s+between"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_answer_seeking_intent(student_answer: str) -> bool:
+    """True when they asked to be taught the fact, not when they offered an attempt."""
+    if _is_help_intent(student_answer):
+        return False
+    plain = _plain_student_text(student_answer)
+    if not plain:
+        return False
+    return bool(_ANSWER_SEEKING_RE.search(plain))
+
+
+def _last_tutor_follow_up(turns: Optional[list[dict[str, Any]]]) -> str:
+    """The previous tutor question the learner is stuck on."""
+    if not turns:
+        return ""
+    for turn in reversed(turns):
+        if not isinstance(turn, dict):
+            continue
+        if str(turn.get("role") or "").strip().lower() != "assistant":
+            continue
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        match = re.search(r"([^\n?]+\?)\s*$", content)
+        if match:
+            return match.group(1).strip()
+        return content[-240:]
+    return ""
 
 
 def _is_greeting_intent(student_answer: str) -> bool:
@@ -1136,6 +1230,8 @@ def _format_few_shot_examples(
     mode: HintMode,
     *,
     max_examples: int = 3,
+    help_intent: bool = False,
+    answer_seeking: bool = False,
 ) -> str:
     """Compile few-shot demonstrations with emphasis on the active persona × mode."""
     ranked: list[tuple[int, int, dict[str, str]]] = []
@@ -1147,6 +1243,12 @@ def _format_few_shot_examples(
             score += 3
         if example["persona"] == persona and example["mode"] == mode:
             score += 2
+        if help_intent and _is_help_intent(example["student"]):
+            score += 6
+        elif not help_intent and _is_help_intent(example["student"]):
+            score -= 4
+        if answer_seeking and _is_answer_seeking_intent(example["student"]):
+            score += 6
         ranked.append((score, idx, example))
     ranked.sort(key=lambda item: (-item[0], item[1]))
 
@@ -1165,10 +1267,43 @@ def _build_system_prompt(
     mode: HintMode,
     persona: str,
     tone_guidance: str,
+    *,
+    help_intent: bool = False,
+    answer_seeking: bool = False,
 ) -> str:
     persona_label = _PERSONA_LABELS[persona]
     state_config = _PERSONA_STATE_MATRIX[persona][mode]
-    few_shots = _format_few_shot_examples(persona, mode)
+    few_shots = _format_few_shot_examples(
+        persona, mode, help_intent=help_intent, answer_seeking=answer_seeking
+    )
+
+    help_block = ""
+    if answer_seeking:
+        help_block = (
+            "--- ANSWER-SEEKING TURN (mandatory) ---\n"
+            "The student asked to be taught a fact (what / how do we / identify). "
+            "Do NOT write that fact. No colour-change rule, no formula, no definition. "
+            "Give one clue, then one prediction question they can try.\n"
+            "BAD: \"Acidic solutions turn blue litmus paper red.\"\n"
+            "GOOD: \"Litmus comes in two colours and acids change only one of them. "
+            "If you dip blue litmus in lemon juice, do you expect it to stay blue or change?\"\n\n"
+        )
+    elif help_intent:
+        help_block = (
+            "--- HELP TURN (mandatory) ---\n"
+            "The latest student message is a plea for help (hint / stuck / I don't know). "
+            "It is NOT a science answer and NOT agreement with your last idea.\n"
+            "They are stuck on YOUR previous follow-up question.\n"
+            "Give one smaller clue toward THAT question. Then ask a simpler version of it.\n"
+            "NEVER write 'you thought', 'you mentioned', 'you said', or 'you picked' unless "
+            "those words appear on a Student line. Tutor lines are your own previous words.\n\n"
+        )
+    else:
+        help_block = (
+            "--- Attribution ---\n"
+            "Only echo words from Student lines. Never treat a Tutor line as something "
+            "the learner thought or said.\n\n"
+        )
 
     return (
         f"You are **{persona_label}**, a Grade 6–9 science tutor. Keep every reply "
@@ -1180,9 +1315,10 @@ def _build_system_prompt(
         f"{_SOCRATIC_GUARDRAILS}\n\n"
         f"--- Active persona × mastery configuration ---\n"
         f"{state_config}\n\n"
+        f"{help_block}"
         f"--- Conversational continuity ---\n"
-        f"- THREAD: If they answered your last question, nod in a few words, then hint once.\n"
-        f"- MEMORY: Echo at most 2–4 of their words. Do not restate their whole message.\n"
+        f"- THREAD: If they actually answered your last question, nod in a few words, then hint once.\n"
+        f"- MEMORY: Echo at most 2–4 words from a Student line only.\n"
         f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or pages.\n"
         f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
         f"  High frustration: even shorter, even kinder, still one idea.\n\n"
@@ -1719,12 +1855,30 @@ def generate_socratic_hint(
     tone_guidance = _tone_guidance_from_frustration(frustration_resolution)
     frustration_audit = build_frustration_audit_fields(frustration_resolution, resolved_persona)
 
+    help_intent = _is_help_intent(student_answer)
+    answer_seeking = _is_answer_seeking_intent(student_answer)
+    last_follow_up = _last_tutor_follow_up(conversation_history)
     hist_block = _format_conversation_history(conversation_history)
     thread_prefix = (
-        f"Recent conversation (older messages first; use this for continuity):\n{hist_block}\n\n"
+        f"Recent conversation (older messages first; Student vs Tutor labels are exact):\n{hist_block}\n\n"
         if hist_block
         else ""
     )
+    help_prefix = ""
+    if help_intent:
+        prior = last_follow_up or "(no previous tutor question — give a tiny clue on the topic)"
+        help_prefix = (
+            "TURN TYPE: help_request. The student did NOT answer. They are stuck on your "
+            f"previous follow-up:\n\"{prior}\"\n"
+            "Scaffold THAT question with one smaller clue. Do not invent what they thought. "
+            "Do not give the full definition or formula. interaction_score should be 0.15–0.30.\n\n"
+        )
+    elif answer_seeking:
+        help_prefix = (
+            "TURN TYPE: answer_seeking. They asked how/what/identify. "
+            "Do NOT state the textbook rule (no \"acids turn blue litmus red\", no formulas). "
+            "One clue + one prediction question. interaction_score 0.20–0.40.\n\n"
+        )
     user_block = (
         f"topic_id: {topic_id}\n"
         f"estimated_mastery_probability: {mastery_before:.4f}\n"
@@ -1735,10 +1889,12 @@ def generate_socratic_hint(
         f"frustration_effective_score: {frustration_resolution.effective_score:.4f}\n"
         f"frustration_source_tag: {frustration_resolution.source_tag}\n\n"
         f"{thread_prefix}"
+        f"{help_prefix}"
         f"PRIVATE tutor curriculum notes (do NOT mention these notes, excerpts, or any "
         f"textbook/source to the student; {source_summary}; may be partial):\n"
         f"{facts if facts else '[no curriculum notes retrieved]'}\n\n"
-        f"Student's **latest** message (verbatim; reply to Tutor above if answering a question):\n"
+        f"Student's **latest** message (verbatim"
+        f"{'; HELP request, not a science answer' if help_intent else ''}):\n"
         f"{student_answer.strip() or '[empty]'}\n\n"
         f"{_reply_constraints(resolved_persona)}"
     )
@@ -1750,7 +1906,13 @@ def generate_socratic_hint(
             response = client.invoke(
                 [
                     SystemMessage(
-                        content=_build_system_prompt(mode, resolved_persona, tone_guidance)
+                        content=_build_system_prompt(
+                            mode,
+                            resolved_persona,
+                            tone_guidance,
+                            help_intent=help_intent,
+                            answer_seeking=answer_seeking,
+                        )
                     ),
                     HumanMessage(content=user_block),
                 ],
@@ -1820,6 +1982,10 @@ def generate_socratic_hint(
         )
     else:
         hint_text = enforce_single_follow_up_question(hint_text)
+    if help_intent and parsed_score is not None:
+        parsed_score = min(float(parsed_score), 0.30)
+    elif answer_seeking and parsed_score is not None:
+        parsed_score = min(float(parsed_score), 0.40)
 
     mastery_after = mastery_before
     bkt_updated = False

@@ -98,96 +98,82 @@ _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
     "practical_encourager": {
         "scaffold": (
             "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5).\n"
-            "- Lead with a vivid everyday metaphor (plumbing, cooking, sport, weather) that matches "
-            "the science you know from your private curriculum notes.\n"
-            "- Sound warmly supportive; normalize that the idea is tricky before asking one small question.\n"
-            "- Give enough concrete logic that the student senses the distinction before you ask.\n"
-            "- Follow-up must be about the real-world science situation—not about a book or passage."
+            "- One everyday comparison in a single short sentence (kitchen, sport, weather).\n"
+            "- Warm and simple; no extra teaching after that comparison.\n"
+            "- One small real-world question."
         ),
         "balanced": (
             "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Briefly mirror something the student said, then link it to a real-world comparison.\n"
-            "- Offer one crisp contrast in plain language; avoid re-teaching the whole topic.\n"
-            "- Close with one discrimination question (same vs different, or which situation fits)."
+            "- Mirror one student phrase, then one short contrast (this vs that).\n"
+            "- Do not re-teach the whole topic.\n"
+            "- One which-situation question."
         ),
         "nudge": (
             "PERSONA × MODE: Practical Encourager · NUDGE (P(L) > 0.8).\n"
-            "- At most one short recap sentence; no long analogy chains.\n"
-            "- Pose an everyday mini-scenario: \"If you tried this at home / on a walk, what would you notice?\"\n"
-            "- Push transfer to a new situation without giving the final label or answer."
+            "- Skip recap. One everyday \"what would you notice?\" question.\n"
+            "- No analogy chains."
         ),
     },
     "analytical_coach": {
         "scaffold": (
             "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5).\n"
-            "- Break the idea into 2–3 numbered micro-steps (cause → mechanism → outcome).\n"
-            "- Speak with quiet certainty about the mechanism; never invent numbers or claim "
-            "\"the text says\".\n"
-            "- End with one step-check question: \"What happens first in that chain?\""
+            "- hint_text MUST be exactly 3 numbered steps (cause → next → outcome), each ≤12 words.\n"
+            "- Then ONE short check question on its own last line.\n"
+            "- No extra paragraph before or after the steps."
         ),
         "balanced": (
             "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Compare two terms or mechanisms side-by-side using a tight if/then structure.\n"
-            "- Highlight one decisive physical variable (path, temperature, medium, etc.).\n"
-            "- Ask which real-world condition would flip the outcome."
+            "- Exactly 3 numbered steps that contrast two paths or one variable.\n"
+            "- Each step ≤12 words. Then ONE question: which change flips the outcome?"
         ),
         "nudge": (
             "PERSONA × MODE: Analytical Coach · NUDGE (P(L) > 0.8).\n"
-            "- Skip basics; invite them to predict how changing ONE variable alters the mechanism.\n"
-            "- Frame as a logical consequence in the physical world, not a lecture.\n"
-            "- One precise hypothetical: \"If we changed X, what would the next step in the process be?\""
+            "- Exactly 3 numbered prediction steps (if we change X → then Y → then Z).\n"
+            "- Each step ≤12 words. Then ONE \"what happens next?\" question."
         ),
     },
     "curious_explorer": {
         "scaffold": (
             "PERSONA × MODE: Curious Explorer · SCAFFOLD (P(L) < 0.5).\n"
-            "- Treat the concept like a puzzle: share one scientific clue, withhold the label.\n"
-            "- Invite a hypothesis in plain words (\"What might be going on here?\").\n"
-            "- Keep wonder in the tone—never sound like a verdict or a reading quiz."
+            "- One clue, then one \"what might be going on?\" question.\n"
+            "- No extra puzzle setup."
         ),
         "balanced": (
             "PERSONA × MODE: Curious Explorer · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- Acknowledge a partial insight, then open a \"what if\" that splits two close ideas.\n"
-            "- Use science-as-mystery framing grounded in one curriculum-supported idea.\n"
-            "- One curiosity-driving question about the physical world—not a multi-part quiz."
+            "- Nod to their idea in a few words, then one \"what if\" that splits two close ideas."
         ),
         "nudge": (
             "PERSONA × MODE: Curious Explorer · NUDGE (P(L) > 0.8).\n"
-            "- Pose a counterfactual that stretches the idea to an unfamiliar real-world case.\n"
-            "- Ask what they would expect to observe or measure—not what a document would say.\n"
-            "- Final line must be openly hypothetical (\"Suppose … then what changes?\")."
+            "- One \"suppose … then what changes?\" question. No extra scene-setting."
         ),
     },
 }
 
 _SOCRATIC_GUARDRAILS = """
 --- NON-NEGOTIABLE SOCRATIC GUARDRAILS (all personas, all modes) ---
-1. PRIVATE GROUNDING: The curriculum snippets in the user message are YOUR private tutor notes
-   (from ``science_syllabus_g6_g9``). Internalize them and speak as an omniscient science tutor
-   who already knows this material. Never invent facts outside those notes. If the notes are
-   empty or silent on a point, say you are unsure about that detail—without mentioning a book,
-   excerpt, PDF, or retrieval system.
-2. BAN META-COMMENTARY IN hint_text: Never use phrases such as \"the excerpt\", \"the text\",
-   \"the textbook\", \"the passage\", \"the reading\", \"according to the text\", \"the text
-   suggests/states/says\", \"the curriculum says\", or reference filenames, page numbers,
-   figures, or \"snippet\" IDs. Do not ask the student to quote, find, or recall wording from
-   any document they cannot see.
-3. EMBODIED KNOWLEDGE: Synthesize the private notes into natural conversational science
-   guidance. Talk about materials, forces, organisms, and everyday situations—not about sources.
-4. FOLLOW-UP = SCIENCE, NOT READING COMPREHENSION: Your single closing question must challenge
-   conceptual understanding of the physical world (what happens, why, which condition changes
-   the outcome). BAD: \"What might the text suggest happens when the wet stick touches the
-   wire?\" GOOD: \"Since water behaves differently than dry wood, what do you think happens to
-   that electrical current when it meets the damp stick in your hand?\" If the student
-   themselves mentions \"textbook\", still answer about the science—do not echo that framing.
-5. NO DIRECT ANSWERS: Never state the full final answer, complete definition, numeric result,
-   worked solution, or \"the correct term is ___\" in hint_text. Scaffolding and hints only.
-6. NO STRUCTURAL DUMPS: Do not dump labeled sections, full lists, or theorem-like pronouncements.
-   Guide the student to articulate the idea themselves.
-7. ONE QUESTION: hint_text ends with exactly ONE inviting science question (not a stack).
-8. BREVITY: hint_text ≤ 120 words; short paragraphs; no markdown fences in hint_text.
-9. VARIETY: Do NOT use canned openers (\"Great job!\", \"Good start!\", \"That's a great start!\",
-   \"Excellent question!\"). Open naturally and differently each turn.
+1. PRIVATE GROUNDING: Curriculum snippets in the user message are YOUR private notes
+   (``science_syllabus_g6_g9``). Speak as a tutor who already knows this. Never invent facts
+   outside those notes. If they are silent, say you are unsure—without mentioning a book,
+   excerpt, PDF, or retrieval.
+2. BAN META-COMMENTARY IN hint_text: Never say \"the excerpt\", \"the text\", \"the textbook\",
+   \"the passage\", \"the reading\", \"according to the text\", \"the curriculum says\", or
+   mention filenames, pages, figures, or snippet IDs.
+3. GRADE 6–9 VOICE: Write for a 11–15 year old. Short words. One idea. No jargon unless you
+   replace it with a 3–4 word plain meaning. No essay tone.
+4. FOLLOW-UP = SCIENCE, NOT READING: One closing question about what happens in the real world.
+   BAD: \"What might the text suggest happens when the wet stick touches the wire?\"
+   GOOD: \"If the stick is wet, can electricity still travel along it?\"
+5. NO DIRECT ANSWERS: Never give the full definition, numeric result, or \"the correct term is\".
+   Hint only.
+6. LAYOUT: Practical Encourager and Curious Explorer — no lists, bullets, or mini-lessons.
+   Analytical Coach ONLY — exactly three numbered lines (`1.` `2.` `3.`), each ≤12 simple
+   words, then ONE short question on the next line. No extra lecture around the list.
+7. ONE QUESTION: hint_text contains exactly ONE question mark. Never a second question
+   (no \"and why?\", no \"what else?\", no stacked ?). The follow-up is the last line only.
+8. BREVITY: Other personas: 1–2 short sentences + that question (hard cap 50 words).
+   Analytical Coach: 3 short steps + one question (about 40 words total).
+9. VARIETY: Do NOT open with \"Great job!\", \"Good start!\", \"That's a great start!\",
+   or \"Excellent question!\".
 10. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
 """.strip()
 
@@ -197,97 +183,97 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "I don't get conductors vs insulators.",
-        "hint": "Think of a hallway where some doors let people through easily and others stay shut—that's how materials behave with electric flow. Metals act more like open doors, while rubber acts more like a locked one. Which everyday object in your kitchen might act like an open door for electricity?",
+        "hint": "A metal spoon lets electricity through; rubber does not. Which kitchen object would let electricity through?",
     },
     {
         "persona": "practical_encourager",
         "mode": "balanced",
         "student": "Renewable and non-renewable—are they the same thing?",
-        "hint": "You picked up that both are energy sources—the key split is whether the supply can be replenished on a human timescale, like sunshine returning each day versus coal taking millions of years to form. Which of those two timescales sounds closer to \"runs out for good\"?",
+        "hint": "Both give energy, but sunlight keeps coming back and coal does not. Which one can run out?",
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "Solid liquid gas—I think I've got it.",
-        "hint": "You've linked the three states. Imagine you leave a puddle on a hot pavement: as the water disappears into the air, what change of state is happening, and what would you expect to feel near that puddle while it lasts?",
+        "hint": "A puddle on hot pavement slowly disappears into the air. What change of state is that?",
     },
     {
         "persona": "analytical_coach",
         "mode": "scaffold",
         "student": "What is photosynthesis?",
-        "hint": "Let's sequence it: (1) light hits the leaf, (2) chlorophyll captures that energy, (3) carbon dioxide and water are combined to store energy in sugars. Which of those inputs must come from the air rather than the soil?",
+        "hint": "1. Light hits the leaf.\n2. The leaf traps that energy.\n3. Air and water help make sugar.\nWhere does the air's part come from?",
     },
     {
         "persona": "analytical_coach",
         "mode": "balanced",
         "student": "Series and parallel circuits confuse me.",
-        "hint": "Focus on path count: one loop versus branches. In series, current has a single route; in parallel, it can split. If one lamp burned out in a series string, what happens to the remaining path for current?",
+        "hint": "1. Series is one path only.\n2. Parallel splits into branches.\n3. A break stops a series path.\nIf one series lamp dies, what happens to the path?",
     },
     {
         "persona": "analytical_coach",
         "mode": "nudge",
         "student": "Density is mass over volume, right?",
-        "hint": "Your ratio is pointed the right way. If we kept mass fixed but doubled volume only, would density go up or down—and what would you notice if you compared those two samples side by side?",
+        "hint": "1. Density is mass compared with space.\n2. Keep mass the same.\n3. Make the volume bigger.\nDoes density go up or down?",
     },
     {
         "persona": "curious_explorer",
         "mode": "scaffold",
         "student": "Why do living things need nutrition?",
-        "hint": "Here's one clue: living things take in materials they cannot stay alive without. Nutrition is not just \"eating for fun\"—it fuels growth and repair. What do you think happens to an organism that stops taking in those materials?",
+        "hint": "Living things need materials they cannot make on their own. What happens if they stop taking those in?",
     },
     {
         "persona": "curious_explorer",
         "mode": "balanced",
         "student": "Acids and bases feel like opposites.",
-        "hint": "You're sensing a real pairing. Acids and bases show themselves through how they react with indicators—not just by being random opposites. If an indicator turned one color in lemon juice, what would you expect when a base is added slowly?",
+        "hint": "They act differently on indicators, not just as opposites. If lemon juice turns an indicator one color, what might a base do?",
     },
     {
         "persona": "curious_explorer",
         "mode": "nudge",
         "student": "Refraction is when light bends.",
-        "hint": "Bending is the visible part—and it connects to speed changes when light crosses between media. Suppose light travels from air into much denser water: would the ray hug the normal more or drift farther from it?",
+        "hint": "Light bends when it changes speed between materials. If it goes from air into water, does it bend toward the normal or away?",
     },
     {
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "I can't tell vertebrates from invertebrates.",
-        "hint": "Picture a backbone like a central tent pole inside some animals but missing in others—that internal support is how we split the groups. Worms and insects fall on one side; fish and birds on the other. Where would a spider land, based on that pole idea?",
+        "hint": "Vertebrates have a backbone; invertebrates do not. Does a spider have a backbone?",
     },
     {
         "persona": "analytical_coach",
         "mode": "balanced",
         "student": "Monocots vs dicots?",
-        "hint": "Compare seed-leaf count and vein patterns. Monocots show parallel veins; dicots show net-like veins. If you only had a leaf drawing, which vein pattern would you measure first?",
+        "hint": "1. Look at the leaf veins.\n2. Monocots run side by side.\n3. Dicots look like a net.\nWhich vein pattern do you see?",
     },
     {
         "persona": "curious_explorer",
         "mode": "nudge",
         "student": "Sound needs a medium—I remember that.",
-        "hint": "Sound needs something to travel through, so vacuum gaps block it. What if an astronaut tapped helmet to helmet with no air between—would the vibration still have a material path to travel?",
+        "hint": "Sound needs something to travel through. If two helmets touch in space, is there still a path for the vibration?",
     },
     {
         "persona": "analytical_coach",
         "mode": "scaffold",
         "student": "Earth's layers are confusing.",
-        "hint": "Work outside-in: crust, then mantle, then core—each layer has its own thickness or state. Which layer sits directly under the crust you stand on?",
+        "hint": "1. You stand on the thin crust.\n2. The mantle sits under it.\n3. The core is in the centre.\nWhat sits directly under the crust?",
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "Evaporation and boiling—same thing?",
-        "hint": "They're related but happen at different scales. Boiling hits the whole liquid at a set temperature; evaporation can happen quietly at the surface. On a windy day at the lake, which process would you notice first without a thermometer?",
+        "hint": "Boiling happens throughout the liquid; evaporation happens at the surface. On a windy lake, which would you notice first?",
     },
     {
         "persona": "curious_explorer",
         "mode": "balanced",
         "student": "What carries oxygen in blood?",
-        "hint": "A specific component inside red blood cells binds oxygen—not the plasma alone. If that component were missing, which job in circulating blood would fail first?",
+        "hint": "Something inside red blood cells carries oxygen, not the watery plasma alone. If that part were missing, what job would fail?",
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "If I used a wet wooden stick to poke a live wire, what would the textbook say could happen?",
-        "hint": "Dry wood usually resists electric flow, but water can change that picture—wet wood can start to behave more like a path for current. Since water behaves differently than dry wood, what do you think happens to that electrical current when it meets the damp stick in your hand?",
+        "hint": "Dry wood usually blocks electricity, but water can make a path. If the stick is wet, can electricity still travel along it?",
     },
 ]
 
@@ -682,11 +668,11 @@ def _tone_guidance_from_frustration(resolution: FrustrationResolution) -> str:
         )
     if resolution.level == "medium":
         return (
-            "Frustration signal is MEDIUM. Be supportive and clear; keep corrections gentle, "
-            "avoid dense jargon, and prefer one focused question over a multi-part drill."
+            "Frustration signal is MEDIUM. Be supportive. Short sentences, no jargon, "
+            "one idea, exactly ONE easy question."
         )
     return (
-        "Frustration signal is LOW. Keep positive tone and normal Socratic pacing."
+        "Frustration signal is LOW. Stay warm and very short. Still one idea and one question."
     )
 
 
@@ -918,8 +904,8 @@ _GREETING_OPENERS: dict[str, str] = {
         "Which topic should we start with?"
     ),
     "curious_explorer": (
-        "Hey! Ready to investigate a science idea? "
-        "What topic can I help you with?"
+        "Hey! I can investigate a Grade 6–9 science idea with you. "
+        "What topic should we start with?"
     ),
 }
 
@@ -1149,7 +1135,7 @@ def _format_few_shot_examples(
     persona: str,
     mode: HintMode,
     *,
-    max_examples: int = 12,
+    max_examples: int = 3,
 ) -> str:
     """Compile few-shot demonstrations with emphasis on the active persona × mode."""
     ranked: list[tuple[int, int, dict[str, str]]] = []
@@ -1185,37 +1171,23 @@ def _build_system_prompt(
     few_shots = _format_few_shot_examples(persona, mode)
 
     return (
-        f"You are **{persona_label}**, a Grade 6–9 science tutor using a multi-persona "
-        f"Socratic scaffolding engine.\n"
+        f"You are **{persona_label}**, a Grade 6–9 science tutor. Keep every reply "
+        f"short enough to read in one glance.\n"
         f"Active state: persona_id={persona}, hint_mode={mode}.\n"
-        f"You speak as a natural, omniscient tutor. Private curriculum notes appear in the user "
-        f"message for YOUR eyes only (collection ``science_syllabus_g6_g9``). Internalize those "
-        f"facts and coach in your own voice. Never reveal the notes as \"text\", \"excerpts\", or "
-        f"\"the textbook\". If the student's ideas conflict with that knowledge, gently redirect "
-        f"using plain science language—not source citations.\n\n"
+        f"Private curriculum notes in the user message are for YOUR eyes only. Coach in your "
+        f"own simple voice. Never call them \"text\", \"excerpts\", or \"the textbook\". "
+        f"If the student is wrong, redirect in plain words—not citations.\n\n"
         f"{_SOCRATIC_GUARDRAILS}\n\n"
-        f"--- Active persona × mastery configuration (9-state matrix cell) ---\n"
+        f"--- Active persona × mastery configuration ---\n"
         f"{state_config}\n\n"
         f"--- Conversational continuity ---\n"
-        f"- THREAD: If a recent transcript is included, the student's latest message often "
-        f"answers your previous question. Acknowledge that answer before scaffolding further.\n"
-        f"- MEMORY: Paraphrase a concrete phrase from their latest message so your reply "
-        f"clearly responds to their words.\n"
-        f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or page "
-        f"references. Describe the science idea in plain language instead.\n"
+        f"- THREAD: If they answered your last question, nod in a few words, then hint once.\n"
+        f"- MEMORY: Echo at most 2–4 of their words. Do not restate their whole message.\n"
+        f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or pages.\n"
         f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
-        f"  When frustration is high, soften delivery while still correcting misconceptions "
-        f"and staying faithful to your private curriculum notes.\n\n"
-        f"--- Correction-first protocol ---\n"
-        f"If their science content is wrong relative to your private notes:\n"
-        f"  1) Brief validation of effort or intent (vary phrasing—no canned praise headers).\n"
-        f"  2) Gentle correction via analogy or contrast about the physical world.\n"
-        f"  3) Exactly ONE follow-up question about conceptual understanding (never reading "
-        f"comprehension of an invisible document).\n"
-        f"If substantially correct, validate briefly and bridge before your one question.\n\n"
-        f"--- Few-shot reference conversations (study style, not facts) ---\n"
-        f"These show natural persona voice across BKT modes—no meta \"text/excerpt\" talk. "
-        f"Do NOT copy their science content unless your private curriculum notes support it.\n\n"
+        f"  High frustration: even shorter, even kinder, still one idea.\n\n"
+        f"{_correction_protocol(persona)}"
+        f"--- Few-shot length/voice samples (copy LENGTH, not facts) ---\n"
         f"{few_shots}\n\n"
         f"--- interaction_score (JSON field only; never shown in hint_text) ---\n"
         f"Set \"interaction_score\" from 0.0 to 1.0 for how well their **latest** answer matches "
@@ -1224,12 +1196,48 @@ def _build_system_prompt(
         f"  • 0.0–0.35: wrong, vague, or major misconception\n"
         f"  • 0.36–0.77: partial / uncertain (not mastered)\n"
         f"  • 0.78–1.0: clearly correct and curriculum-aligned\n\n"
-        f"--- OUTPUT FORMAT (mandatory) ---\n"
-        f"Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
-        f"≤120 words) and \"interaction_score\" (number). Example: "
-        f'{{"hint_text":"...","interaction_score":0.55}}\n'
-        f"If interaction_score is missing or not a number, the server skips dialogue-derived "
-        f"BKT logic for this turn—always include a valid number.\n"
+        f"{_output_format_block(persona)}"
+    )
+
+
+def _correction_protocol(persona: str) -> str:
+    if persona == "analytical_coach":
+        return (
+            "--- Correction-first protocol (Analytical Coach) ---\n"
+            "Put the gentle correction inside the 3 numbered steps. Do not add a paragraph "
+            "before the list. End with one question.\n\n"
+        )
+    return (
+        "--- Correction-first protocol (still brief) ---\n"
+        "If they are wrong: one kind clause + one contrast + one question. That is the whole reply.\n"
+        "If they are right: one short nod + one next-step question. Do not add a mini-lesson.\n\n"
+    )
+
+
+def _output_format_block(persona: str) -> str:
+    if persona == "analytical_coach":
+        example = (
+            '{"hint_text":"1. Light hits the leaf.\\n2. The leaf traps that energy.\\n'
+            '3. Air and water help make sugar.\\nWhere does the air\'s part come from?",'
+            '"interaction_score":0.35}'
+        )
+        return (
+            "--- OUTPUT FORMAT (mandatory) ---\n"
+            "Return ONLY a single JSON object with \"hint_text\" and \"interaction_score\".\n"
+            "hint_text for Analytical Coach MUST look like:\n"
+            "1. short step\n2. short step\n3. short step\nOne short question?\n"
+            f"Example: {example}\n"
+            "If interaction_score is missing or not a number, the server skips dialogue-derived "
+            "BKT logic for this turn—always include a valid number.\n"
+        )
+    return (
+        "--- OUTPUT FORMAT (mandatory) ---\n"
+        "Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
+        "1–2 short sentences + one question, ≤50 words) and \"interaction_score\" (number). "
+        'Example: {"hint_text":"A metal spoon lets electricity through; rubber does not. '
+        'Which kitchen object would let electricity through?","interaction_score":0.35}\n'
+        "If interaction_score is missing or not a number, the server skips dialogue-derived "
+        "BKT logic for this turn—always include a valid number.\n"
     )
 
 
@@ -1270,6 +1278,118 @@ def _parse_llm_json_payload(content: str) -> tuple[str, Optional[float], Optiona
 
     score_f = max(0.0, min(1.0, score_f))
     return hint.strip(), score_f, None
+
+
+_NUMBERED_LINE_RE = re.compile(
+    r"^\s*(?:\(?([1-9])\)?[.)]|[-*])\s+(.+?)\s*$"
+)
+_INLINE_STEP_RE = re.compile(
+    r"(?:^|\s)\(?([1-3])\)?[.)]\s+(.+?)(?=(?:\s*\(?[1-3]\)?[.)])|$)",
+    re.DOTALL,
+)
+
+
+def _reply_constraints(persona: str) -> str:
+    if persona == "analytical_coach":
+        return (
+            "Reply constraints: Analytical Coach. Exactly 3 numbered steps (`1.` `2.` `3.`), "
+            "each ≤12 Grade 6–9 words, then ONE short question on the last line.\n"
+        )
+    return (
+        "Reply constraints: Grade 6–9 reading level. 1–2 short sentences + one question. "
+        "Max 50 words. No lists, no numbered steps, no extra explanation.\n"
+    )
+
+
+def extract_analytical_steps(hint_text: str) -> tuple[list[str], Optional[str]]:
+    """Split Analytical Coach hint_text into up to 3 steps plus a closing question."""
+    raw = (hint_text or "").strip()
+    if not raw:
+        return [], None
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    steps: list[str] = []
+    other: list[str] = []
+    for line in lines:
+        match = _NUMBERED_LINE_RE.match(line)
+        if match:
+            steps.append(match.group(2).strip())
+        else:
+            other.append(line)
+
+    if len(steps) < 2:
+        inline = _INLINE_STEP_RE.findall(re.sub(r"\s+", " ", raw))
+        if len(inline) >= 2:
+            steps = [chunk.strip(" .") for _, chunk in inline[:3]]
+            other = []
+
+    question: Optional[str] = None
+    if other:
+        question = other[-1].strip()
+    elif steps and steps[-1].endswith("?"):
+        question = steps.pop()
+
+    cleaned = [
+        re.sub(r"\?+", "", step).strip(" .") for step in steps if step
+    ][:3]
+    if question:
+        q_parts = re.findall(r"[^?]*\?", question)
+        question = q_parts[-1].strip() if q_parts else question
+        if question.count("?") > 1:
+            question = question[question.rfind("?", 0, -1) + 1 :].strip() or question
+        if not question.endswith("?"):
+            question = f"{question.rstrip(' .')}?"
+    return cleaned, question or None
+
+
+def enforce_single_follow_up_question(hint_text: str) -> str:
+    """Keep at most one '?' in a tutor reply (the last follow-up)."""
+    raw = (hint_text or "").strip()
+    if not raw or raw.count("?") <= 1:
+        return raw
+
+    newline = "\n" in raw
+    pieces = [ln.strip() for ln in raw.splitlines() if ln.strip()] if newline else [raw]
+
+    body: list[str] = []
+    questions: list[str] = []
+    step_questions: list[str] = []
+
+    for piece in pieces:
+        numbered = bool(_NUMBERED_LINE_RE.match(piece))
+        if numbered:
+            if "?" in piece:
+                match = _NUMBERED_LINE_RE.match(piece)
+                if match:
+                    step_questions.append(match.group(2).strip().rstrip("?").strip())
+                body.append(re.sub(r"\?+", ".", piece).replace("..", ".").rstrip())
+            else:
+                body.append(piece)
+            continue
+        if "?" not in piece:
+            body.append(piece)
+            continue
+        for segment in re.findall(r"[^?]+(?:\?|$)", piece):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if segment.endswith("?"):
+                questions.append(segment)
+            else:
+                body.append(segment.rstrip(" ,;"))
+
+    last_q = questions[-1].strip() if questions else None
+    if not last_q and step_questions:
+        last_q = step_questions[-1]
+    if last_q and not last_q.endswith("?"):
+        last_q = f"{last_q.rstrip(' .')}?"
+
+    sep = "\n" if newline else " "
+    if body and last_q:
+        return f"{sep.join(body)}{sep}{last_q}".strip()
+    if last_q:
+        return last_q
+    return sep.join(body).strip() or raw
 
 
 def _socratic_discounted_bkt_label(interaction_score: float) -> int:
@@ -1619,7 +1739,8 @@ def generate_socratic_hint(
         f"textbook/source to the student; {source_summary}; may be partial):\n"
         f"{facts if facts else '[no curriculum notes retrieved]'}\n\n"
         f"Student's **latest** message (verbatim; reply to Tutor above if answering a question):\n"
-        f"{student_answer.strip() or '[empty]'}\n"
+        f"{student_answer.strip() or '[empty]'}\n\n"
+        f"{_reply_constraints(resolved_persona)}"
     )
 
     try:
@@ -1697,6 +1818,8 @@ def generate_socratic_hint(
             "I had trouble reading the tutor response just now. "
             "Please try sending your message again."
         )
+    else:
+        hint_text = enforce_single_follow_up_question(hint_text)
 
     mastery_after = mastery_before
     bkt_updated = False
@@ -1727,6 +1850,10 @@ def generate_socratic_hint(
 
     consume_frustration_after_hint(user_id, topic_id, score_effective)
 
+    coach_steps, coach_question = ([], None)
+    if resolved_persona == "analytical_coach":
+        coach_steps, coach_question = extract_analytical_steps(hint_text)
+
     return {
         "success": True,
         "user_id": str(user_id),
@@ -1738,6 +1865,8 @@ def generate_socratic_hint(
         "persona_id": resolved_persona,
         "persona_label": persona_label,
         "hint_text": hint_text,
+        "hint_steps": coach_steps,
+        "closing_question": coach_question,
         "interaction_score": parsed_score,
         "interaction_score_effective": score_effective,
         "bkt_updated": bkt_updated,

@@ -426,7 +426,22 @@ _STUDENT_TOPIC_ALIASES: dict[str, list[str]] = {
     ],
     "G8_C11_PHO_PROCESS": ["photosynthesis", "chlorophyll", "glucose"],
     "G9_C14_WAV_REFRACT": ["refraction", "refract", "critical angle"],
-    "G7_C11_SOU_PROPAG": ["sound wave", "frequency", "amplitude", "pitch"],
+    "G7_C11_SOU_PRODUCE": [
+        "sound",
+        "sounds",
+        "vibration",
+        "vibrate",
+        "vibrating",
+    ],
+    "G7_C11_SOU_PROPAG": [
+        "sound",
+        "sounds",
+        "sound wave",
+        "frequency",
+        "amplitude",
+        "pitch",
+        "echo",
+    ],
     "G6_C8_ELE_CONDINS": ["conductor", "insulator", "rubber wire"],
 }
 

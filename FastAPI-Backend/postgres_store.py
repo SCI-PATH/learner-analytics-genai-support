@@ -21,6 +21,8 @@ BKT_SKILL_PARAMS_TABLE = "learner_analytics.bkt_skill_params"
 BKT_MASTERY_TABLE = "learner_analytics.bkt_mastery"
 TUTOR_TURNS_TABLE = "learner_analytics.tutor_turns"
 FRUSTRATION_CUES_TABLE = "learner_analytics.frustration_cues"
+GAMING_STUDENTS_TABLE = "engagement_gaming.students"
+GAMING_PLAY_SOURCE = "gaming_play"
 SHARED_CLASSES_TABLE = "shared.classes"
 SHARED_CLASS_ENROLLMENTS_TABLE = "shared.class_enrollments"
 SHARED_TOPICS_TABLE = "shared.topics"
@@ -677,6 +679,67 @@ def delete_seed_dashboard_analytics(
     return counts
 
 
+def _unit_frustration_score(raw: Any) -> Optional[float]:
+    """Farm scores are 0–100. Tutor cues and the dashboard use 0–1."""
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if score > 1.0:
+        score = score / 100.0
+    return max(0.0, min(1.0, score))
+
+
+def _sync_gaming_play_cues(cur: Any, learner_ids: list[str]) -> None:
+    """Copy latest farm scores into frustration cues.
+
+    Play already writes ``engagement_gaming.students.latest_frustration_score``.
+    The teacher dashboard only reads ``learner_analytics.frustration_cues``,
+    which used to be filled when Ask Socrates opened. A changed farm score is
+    stored once, without Ask Socrates.
+    """
+    cur.execute("SAVEPOINT gaming_play_cues")
+    try:
+        cur.execute(
+            f"""
+            SELECT student_id, latest_frustration_score
+            FROM {GAMING_STUDENTS_TABLE}
+            WHERE student_id = ANY(%s)
+              AND latest_frustration_score IS NOT NULL
+            """,
+            (learner_ids,),
+        )
+        rows = cur.fetchall()
+        for student_id, raw in rows:
+            unit = _unit_frustration_score(raw)
+            if unit is None:
+                continue
+            uid = str(student_id)
+            cur.execute(
+                f"""
+                INSERT INTO {FRUSTRATION_CUES_TABLE} (
+                    learner_id, frustration_score, source, recorded_at
+                )
+                SELECT %s, %s, %s, NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM (
+                        SELECT frustration_score
+                        FROM {FRUSTRATION_CUES_TABLE}
+                        WHERE learner_id = %s AND source = %s
+                        ORDER BY recorded_at DESC NULLS LAST
+                        LIMIT 1
+                    ) latest
+                    WHERE ABS(latest.frustration_score - %s) < 0.0001
+                )
+                """,
+                (uid, unit, GAMING_PLAY_SOURCE, uid, GAMING_PLAY_SOURCE, unit),
+            )
+        cur.execute("RELEASE SAVEPOINT gaming_play_cues")
+    except Exception:
+        cur.execute("ROLLBACK TO SAVEPOINT gaming_play_cues")
+
+
 def fetch_frustration_scores_for_learner(learner_id: str) -> list[float]:
     """All frustration cue scores for one learner (engagement metrics)."""
     by_user = fetch_frustration_scores_for_learners([str(learner_id)])
@@ -686,7 +749,11 @@ def fetch_frustration_scores_for_learner(learner_id: str) -> list[float]:
 def fetch_frustration_scores_for_learners(
     learner_ids: list[str],
 ) -> dict[str, list[float]]:
-    """Batch frustration cues keyed by learner_id."""
+    """Batch frustration cues keyed by learner_id.
+
+    Also stores the latest farm score for each learner so a student who
+    played but never opened Ask Socrates still appears on the dashboard.
+    """
     if not postgres_configured() or psycopg is None:
         return {}
     ids = [str(uid) for uid in learner_ids if str(uid).strip()]
@@ -696,6 +763,7 @@ def fetch_frustration_scores_for_learners(
     try:
         with _connect() as conn:
             with conn.cursor() as cur:
+                _sync_gaming_play_cues(cur, ids)
                 cur.execute(
                     f"""
                     SELECT learner_id, frustration_score

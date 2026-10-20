@@ -658,17 +658,13 @@ def _build_student_focus_areas(
         for row in _live_attempts_for_user(uid)
         if row.get("topic_id")
     }
-    signal_topics = {
-        tid for (u, tid), vals in _signal_history.items() if u == uid and vals
-    }
     state_topics = {
         tid
         for (u, tid), state in engine.student_state.items()
         if u == uid and isinstance(state, dict) and int(state.get("attempts", 0)) > 0
     }
-    topics_with_evidence = sorted(
-        (live_topics | signal_topics | state_topics) & set(topic_pool)
-    )
+    # Tutor chat can name a topic and leave it at the 0.25 prior. That is not practice.
+    topics_with_evidence = sorted((live_topics | state_topics) & set(topic_pool))
 
     for topic in topics_with_evidence:
         mastery = float(engine.get_current_mastery_probability(uid, topic))
@@ -1860,28 +1856,31 @@ def _select_current_topic_for_user(
     Pick a user's current topic for risk checks.
 
     Priority:
-    1) Latest event topic seen via tutor/assessment ingestion.
-    2) Topic with highest attempts in current in-memory BKT state.
-    3) First topic from provided topic list.
+    1) Latest topic that has at least one quiz attempt.
+    2) Otherwise the practised topic with the most attempts.
+
+    Chat-only topics stay at the 0.25 prior and are not a follow-up.
     """
     uid = str(user_id)
+
+    def attempt_count(topic: str) -> int:
+        state = engine.student_state.get((uid, topic))
+        if not isinstance(state, dict):
+            return 0
+        return int(state.get("attempts", 0) or 0)
+
     latest = _latest_topic_by_user.get(uid)
-    if latest and latest in topics:
+    if latest and latest in topics and attempt_count(latest) > 0:
         return latest
 
     best_topic: Optional[str] = None
-    best_attempts = -1
+    best_attempts = 0
     for topic in topics:
-        state = engine.student_state.get((uid, topic))
-        if not isinstance(state, dict):
-            continue
-        attempts = int(state.get("attempts", 0))
+        attempts = attempt_count(topic)
         if attempts > best_attempts:
             best_attempts = attempts
             best_topic = topic
-    if best_topic:
-        return best_topic
-    return topics[0] if topics else None
+    return best_topic
 
 
 def _mean_or_none(values: list[float], *, digits: int = 4) -> Optional[float]:

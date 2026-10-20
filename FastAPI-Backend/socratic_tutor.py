@@ -97,54 +97,66 @@ _PERSONA_ALIASES: dict[str, str] = {
 _PERSONA_STATE_MATRIX: dict[str, dict[str, str]] = {
     "practical_encourager": {
         "scaffold": (
-            "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5).\n"
-            "- If they just answered you: verdict first (Yes that's right / Not quite / Partly).\n"
-            "- Then one everyday comparison (kitchen, sport, weather). Withhold extra teaching.\n"
-            "- One small real-world prediction question."
+            "PERSONA × MODE: Practical Encourager · SCAFFOLD (P(L) < 0.5). MOST help.\n"
+            "- THREE short simple lines. Words a 12-year-old knows.\n"
+            "- Lines 1–2: an everyday scene only. Do NOT say what the thing is, what it is used for, or what it is like.\n"
+            "- Last line: ONE this-or-that question (A or B). Exactly one question mark in the whole reply.\n"
+            "- If they just answered you: line 1 is the verdict, then the scene, then the question."
         ),
         "balanced": (
-            "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- If they just answered you: verdict first, then one short contrast (this vs that).\n"
-            "- Do not re-teach the whole topic.\n"
-            "- One which-situation question."
+            "PERSONA × MODE: Practical Encourager · BALANCED (0.5 ≤ P(L) ≤ 0.8). MEDIUM help.\n"
+            "- TWO short simple lines. Less scene than scaffold. No definition.\n"
+            "- Line 1: one contrast (this versus that). Do not name the finished use.\n"
+            "- Last line: ONE which-one question. Exactly one question mark.\n"
+            "- If they just answered you: verdict, then the contrast, then the question."
         ),
         "nudge": (
-            "PERSONA × MODE: Practical Encourager · NUDGE (P(L) > 0.8).\n"
-            "- If they just answered you: one-word verdict, then one \"what would you notice?\" question.\n"
-            "- No analogy chains."
+            "PERSONA × MODE: Practical Encourager · NUDGE (P(L) > 0.8). LEAST help.\n"
+            "- TWO short simple lines. No analogy. No \"it is like a …\". No statement of the use.\n"
+            "- Line 1: a situation they can already picture. Do not explain it.\n"
+            "- Last line: ONE \"what would you notice?\" question. Exactly one question mark.\n"
+            "- If they just answered you: a short verdict, then that question."
         ),
     },
     "analytical_coach": {
         "scaffold": (
-            "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5).\n"
-            "- If they just answered you: first line is a short verdict, then 3 numbered clues.\n"
-            "- The 3 lines must NOT state the why / what / how they asked for.\n"
-            "- Then ONE short check question on its own last line."
+            "PERSONA × MODE: Analytical Coach · SCAFFOLD (P(L) < 0.5). MOST help.\n"
+            "- 3 numbered clues in very plain words, each a small everyday hint, NOT the answer.\n"
+            "- Do NOT state the why / what / how / used-for they asked.\n"
+            "- Then ONE this-or-that question on its own last line. Exactly one question mark.\n"
+            "- If they just answered you: a verdict line before the numbered clues."
         ),
         "balanced": (
-            "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- If they just answered you: verdict line first, then 3 numbered contrast clues.\n"
-            "- Do NOT name the finished rule. Each step ≤12 words. Then ONE question."
+            "PERSONA × MODE: Analytical Coach · BALANCED (0.5 ≤ P(L) ≤ 0.8). MEDIUM help.\n"
+            "- 3 numbered contrast clues (this versus that). Do NOT name the finished rule or use.\n"
+            "- Each step ≤12 simple words. Then ONE which-one question. Exactly one question mark.\n"
+            "- If they just answered you: verdict line first."
         ),
         "nudge": (
-            "PERSONA × MODE: Analytical Coach · NUDGE (P(L) > 0.8).\n"
-            "- If they just answered you: verdict line first, then 3 numbered prediction clues.\n"
-            "- Still withhold the textbook sentence. Then ONE \"what happens next?\" question."
+            "PERSONA × MODE: Analytical Coach · NUDGE (P(L) > 0.8). LEAST help.\n"
+            "- 3 very thin numbered lines. No definition. No \"it is like\".\n"
+            "- Then ONE \"what would you notice?\" question. Exactly one question mark.\n"
+            "- If they just answered you: verdict line first."
         ),
     },
     "curious_explorer": {
         "scaffold": (
-            "PERSONA × MODE: Curious Explorer · SCAFFOLD (P(L) < 0.5).\n"
-            "- If they just answered you: verdict first, then one clue.\n"
-            "- Then one \"what might be going on?\" question. No extra puzzle setup."
+            "PERSONA × MODE: Curious Explorer · SCAFFOLD (P(L) < 0.5). MOST help.\n"
+            "- THREE short simple lines. A small scene, then one clue that is NOT the answer.\n"
+            "- Last line: ONE this-or-that question. Exactly one question mark.\n"
+            "- If they just answered you: verdict first."
         ),
         "balanced": (
-            "PERSONA × MODE: Curious Explorer · BALANCED (0.5 ≤ P(L) ≤ 0.8).\n"
-            "- If they just answered you: verdict first, then one \"what if\" that splits two close ideas."
+            "PERSONA × MODE: Curious Explorer · BALANCED (0.5 ≤ P(L) ≤ 0.8). MEDIUM help.\n"
+            "- TWO short simple lines. One \"what if\" that splits two close ideas. No definition.\n"
+            "- Exactly one question mark, on the last line.\n"
+            "- If they just answered you: verdict first."
         ),
         "nudge": (
-            "PERSONA × MODE: Curious Explorer · NUDGE (P(L) > 0.8).\n"
-            "- If they just answered you: verdict first, then one \"suppose … then what changes?\" question."
+            "PERSONA × MODE: Curious Explorer · NUDGE (P(L) > 0.8). LEAST help.\n"
+            "- TWO short simple lines. No analogy that states the job.\n"
+            "- Last line: ONE \"suppose this changes — what would you notice?\" question.\n"
+            "- If they just answered you: verdict first."
         ),
     },
 }
@@ -166,21 +178,28 @@ _SOCRATIC_GUARDRAILS = """
 5. SOCRATIC — NEVER GIVE THE ANSWER (every persona, every mode, every question):
    You are not a textbook. The student must arrive at the fact by answering YOUR question.
    If a marker could tick THEIR question from your hint_text alone, it is too direct.
+   An analogy that states the job IS the answer. \"It is like a …\" that names the use is forbidden.
    This covers why / what / how / when / where / which / need / used for / define —
    including Analytical Coach's 3 steps (those are riddles, not three facts).
    BAD: \"Fish use gills to take oxygen from water.\"
    BAD: \"Acidic solutions turn blue litmus paper red.\"
+   BAD: \"A capacitor is like a small rechargeable battery that can dump its energy fast.\"
    BAD: \"1. Sodium is in table salt  2. It helps nerves  3. It balances body fluids\"
-   GOOD: \"Fish stay underwater and cannot use lungs like you. What gas in the water
-   must reach their blood?\"
+   GOOD (scaffold, 3 lines, one question): \"A camera flash is bright for a second, then has to wait.
+   Something in that circuit is pausing between flashes.
+   Is it using the electricity the instant it arrives, or keeping a little aside first?\"
 6. LAYOUT: Practical Encourager and Curious Explorer — no lists, bullets, or mini-lessons.
    Analytical Coach ONLY — exactly three numbered lines (`1.` `2.` `3.`), each ≤12 simple
    words, then ONE short question on the next line. If they just answered you, put ONE
    short verdict line BEFORE the numbered list (not instead of it).
 7. ONE QUESTION: hint_text contains exactly ONE question mark. Never a second question
    (no \"and why?\", no \"what else?\", no stacked ?). The follow-up is the last line only.
-8. BREVITY: Other personas: 1–2 short sentences + that question (hard cap 50 words).
-   Analytical Coach: optional verdict + 3 short steps + one question (about 45 words total).
+8. LENGTH BY MASTERY (simple words, never a paragraph):
+   SCAFFOLD (low mastery): 3 short lines, then the one question.
+   BALANCED (middle mastery): 2 short lines, then the one question.
+   NUDGE (high mastery): 2 short lines and almost no new fact, then the one question.
+   Analytical Coach keeps 3 numbered clues plus the one question in every mode;
+   scaffold clues are everyday, balanced clues contrast two ideas, nudge clues are thin.
 9. VARIETY: Do NOT open with \"Great job!\", \"Good start!\", \"That's a great start!\",
    or \"Excellent question!\". When they answered your last question, DO open with a
    verdict: \"Yes — that's right.\", \"Not quite.\", or \"Partly right.\"
@@ -201,8 +220,40 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     {
         "persona": "practical_encourager",
         "mode": "scaffold",
+        "student": "What is a capacitor used for?",
+        "hint": (
+            "A camera flash is bright for a second, then has to wait before it can flash again.\n"
+            "Something in that circuit is pausing between flashes.\n"
+            "Is it using the electricity the instant it arrives, or keeping a little aside first?"
+        ),
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "balanced",
+        "student": "What is a capacitor used for?",
+        "hint": (
+            "A camera flash waits, then fires all at once.\n"
+            "During the wait, is the electricity used up immediately, or set aside for that sudden flash?"
+        ),
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "nudge",
+        "student": "What is a capacitor used for?",
+        "hint": (
+            "A camera flash is quiet, then suddenly very bright.\n"
+            "What would you notice about the electricity in the moment just before the flash?"
+        ),
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
         "student": "I don't get conductors vs insulators.",
-        "hint": "Some kitchen tools let electricity pass and some block it. Would a metal spoon or a rubber spatula be safer near a socket?",
+        "hint": (
+            "In a kitchen, some tools let electricity pass and some block it.\n"
+            "A metal spoon and a rubber spatula are not the same near a socket.\n"
+            "Which one would you rather keep away from the socket?"
+        ),
     },
     {
         "persona": "practical_encourager",
@@ -220,13 +271,19 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "practical_encourager",
         "mode": "balanced",
         "student": "Renewable and non-renewable—are they the same thing?",
-        "hint": "One kind of energy keeps arriving every day; the other is dug up and gone. Which one can run out?",
+        "hint": (
+            "One kind of energy keeps arriving every day. The other is dug up, and then it is gone.\n"
+            "Which one can run out?"
+        ),
     },
     {
         "persona": "practical_encourager",
         "mode": "nudge",
         "student": "Solid liquid gas—I think I've got it.",
-        "hint": "A puddle on hot pavement slowly disappears into the air. What change of state is that?",
+        "hint": (
+            "A puddle on hot pavement slowly disappears into the air.\n"
+            "What change of state is that?"
+        ),
     },
     {
         "persona": "analytical_coach",
@@ -1516,8 +1573,10 @@ def _build_system_prompt(
 
     return (
         f"You are **{persona_label}**, a Grade 6–9 SOCRATIC science tutor. "
-        f"Students learn by answering YOUR question. You never hand them the finished fact. "
-        f"Keep every reply short enough to read in one glance.\n"
+        f"Students learn by answering YOUR question. You never hand them the finished fact, "
+        f"the definition, or the use. An analogy that states the job is still the answer.\n"
+        f"Match hint_mode length: scaffold = 3 simple lines, balanced = 2, nudge = 2 thin lines. "
+        f"Always end with exactly one question. Simple words only.\n"
         f"Active state: persona_id={persona}, hint_mode={mode}.\n"
         f"Private curriculum notes in the user message are for YOUR eyes only. Coach in your "
         f"own simple voice. Never call them \"text\", \"excerpts\", or \"the textbook\". "
@@ -1531,9 +1590,9 @@ def _build_system_prompt(
         f"- MEMORY: Echo at most 2–4 words from a Student line only.\n"
         f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or pages.\n"
         f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
-        f"  High frustration: even shorter, even kinder, still one idea.\n\n"
+        f"  High frustration: kinder words, same hint_mode length, still one question, still no finished fact.\n\n"
         f"{_correction_protocol(persona, answer_seeking=answer_seeking, attempt=attempt)}"
-        f"--- Few-shot length/voice samples (copy LENGTH, not facts) ---\n"
+        f"--- Few-shot length/voice samples (copy LENGTH and the withheld answer, not the facts) ---\n"
         f"{few_shots}\n\n"
         f"--- interaction_score (JSON field only; never shown in hint_text) ---\n"
         f"Set \"interaction_score\" from 0.0 to 1.0 for how well their **latest** answer matches "
@@ -1542,7 +1601,7 @@ def _build_system_prompt(
         f"  • 0.0–0.35: wrong, vague, or major misconception\n"
         f"  • 0.36–0.77: partial / uncertain (not mastered)\n"
         f"  • 0.78–1.0: clearly correct and curriculum-aligned\n\n"
-        f"{_output_format_block(persona, answer_seeking=answer_seeking, attempt=attempt)}"
+        f"{_output_format_block(persona, mode, answer_seeking=answer_seeking, attempt=attempt)}"
     )
 
 
@@ -1580,14 +1639,34 @@ def _correction_protocol(
             "before the list. End with one question.\n\n"
         )
     return (
-        "--- Correction-first protocol (still brief) ---\n"
-        "If they are wrong: one kind clause + one contrast + one question. That is the whole reply.\n"
-        "If they are right: one short nod + one next-step question. Do not add a mini-lesson.\n\n"
+        "--- Correction-first protocol ---\n"
+        "If they are wrong: a kind line, one contrast, then one question. Do not state the right fact.\n"
+        "If they are right: a short nod, then the next smaller piece of the same idea, then one question.\n"
+        "Stay inside the hint_mode line count. Do not add a mini-lesson.\n\n"
+    )
+
+
+def _hint_length_rule(mode: HintMode) -> str:
+    if mode == "nudge":
+        return (
+            "NUDGE: exactly 2 short simple lines. No analogy. Do not say what it is or what it is used for. "
+        )
+    if mode == "balanced":
+        return (
+            "BALANCED: exactly 2 short simple lines. One contrast only. Do not define the thing. "
+        )
+    return (
+        "SCAFFOLD: exactly 3 short simple lines. An everyday scene, then one this-or-that question. "
+        "Do not say what it is or what it is used for. "
     )
 
 
 def _output_format_block(
-    persona: str, *, answer_seeking: bool = False, attempt: bool = False
+    persona: str,
+    mode: HintMode = "scaffold",
+    *,
+    answer_seeking: bool = False,
+    attempt: bool = False,
 ) -> str:
     if persona == "analytical_coach":
         if attempt:
@@ -1637,7 +1716,8 @@ def _output_format_block(
         return (
             "--- OUTPUT FORMAT (mandatory) ---\n"
             "Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
-            "verdict + one clue + one question, ≤50 words) and \"interaction_score\" (number). "
+            f"{_hint_length_rule(mode)} Verdict first, then the clue lines, then one question. "
+            "Do not state the fact.) and \"interaction_score\" (number). "
             'Example: {"hint_text":"Yes — oxygen is right. If that gas never reached their blood, '
             'what would happen when they try to swim?","interaction_score":0.84}\n'
             "If interaction_score is missing or not a number, the server skips dialogue-derived "
@@ -1646,7 +1726,8 @@ def _output_format_block(
     return (
         "--- OUTPUT FORMAT (mandatory) ---\n"
         "Return ONLY a single JSON object with exactly two keys: \"hint_text\" (string, "
-        "1–2 short sentences + one question, ≤50 words) and \"interaction_score\" (number). "
+        f"{_hint_length_rule(mode)} Exactly one question at the end. "
+        "Never state the use or the definition.) and \"interaction_score\" (number). "
         'Example: {"hint_text":"You already meet this metal at meals. What white crystals '
         'next to pepper hold a lot of it?","interaction_score":0.35}\n'
         "If interaction_score is missing or not a number, the server skips dialogue-derived "
@@ -1703,10 +1784,15 @@ _INLINE_STEP_RE = re.compile(
 
 
 def _reply_constraints(
-    persona: str, *, answer_seeking: bool = False, attempt: bool = False
+    persona: str,
+    mode: HintMode = "scaffold",
+    *,
+    answer_seeking: bool = False,
+    attempt: bool = False,
 ) -> str:
     socratic = (
-        " NEVER state the finished science fact "
+        " NEVER state the finished science fact, the definition, or the use. "
+        "\"It is like a battery that dumps energy\" is a direct answer and is forbidden. "
         "(no 'fish use gills to take oxygen from water', no uses lists, no colour-change rules)."
     )
     extra = (
@@ -1737,12 +1823,14 @@ def _reply_constraints(
         return f"{lead}{socratic}{extra}\n"
     if attempt:
         return (
-            "Reply constraints: Grade 6–9 reading level. Verdict + one clue + one question. "
-            f"Max 50 words. No lists.{socratic}{extra}\n"
+            "Reply constraints: Grade 6–9 reading level. Simple words. "
+            f"{_hint_length_rule(mode)}Verdict first. Exactly one question mark. No lists."
+            f"{socratic}{extra}\n"
         )
     return (
-        "Reply constraints: Grade 6–9 reading level. 1–2 short sentences + one question. "
-        f"Max 50 words. No lists.{socratic}{extra}\n"
+        "Reply constraints: Grade 6–9 reading level. Simple words. "
+        f"{_hint_length_rule(mode)}Exactly one question mark, on the last line. No lists."
+        f"{socratic}{extra}\n"
     )
 
 
@@ -1785,6 +1873,26 @@ def extract_analytical_steps(hint_text: str) -> tuple[list[str], Optional[str]]:
         if not question.endswith("?"):
             question = f"{question.rstrip(' .')}?"
     return cleaned, question or None
+
+
+_DIRECT_ANSWER_RE = re.compile(
+    r"(?:"
+    r"\bused\s+(?:for|to)\b|"
+    r"\b(?:is|are)\s+like\b|"
+    r"\blike\s+a\s+(?:small\s+)?(?:rechargeable\s+)?battery\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_direct_answer(hint_text: str) -> bool:
+    """True when a tutor reply states the fact or never asks a question."""
+    text = (hint_text or "").strip()
+    if not text:
+        return False
+    if "?" not in text:
+        return True
+    return bool(_DIRECT_ANSWER_RE.search(text))
 
 
 def enforce_single_follow_up_question(hint_text: str) -> str:
@@ -2205,10 +2313,10 @@ def generate_socratic_hint(
         help_prefix = (
             "TURN TYPE: answer_seeking. They asked a science question "
             "(why / what / how / need / used for / …). "
-            "Do NOT answer it "
-            "(no \"fish use gills to take oxygen from water\", "
-            "no \"acids turn blue litmus red\", no \"sodium is in salt / nerves / fluids\"). "
-            "Clues + one prediction question about the same thing they asked. "
+            "Do NOT answer it. Do NOT say what it is, what it is like, or what it is used for. "
+            "BAD: \"A capacitor is like a small rechargeable battery that can dump its energy fast.\" "
+            "GOOD scaffold: three simple lines about a camera flash waiting, then one this-or-that question. "
+            "Match hint_mode length. Exactly one question. "
             "Do not drift to a related event. interaction_score 0.20–0.40.\n\n"
         )
     elif attempt:
@@ -2242,7 +2350,7 @@ def generate_socratic_hint(
         f"{'; they asked a question — do not answer it' if answer_seeking else ''}"
         f"{'; they answered your last follow-up — validate it first' if attempt else ''}):\n"
         f"{student_answer.strip() or '[empty]'}\n\n"
-        f"{_reply_constraints(resolved_persona, answer_seeking=answer_seeking, attempt=attempt)}"
+        f"{_reply_constraints(resolved_persona, mode, answer_seeking=answer_seeking, attempt=attempt)}"
     )
 
     try:
@@ -2288,6 +2396,48 @@ def generate_socratic_hint(
                     retry_parsed_score,
                     retry_parse_err,
                 )
+
+        if hint_text and _looks_like_direct_answer(hint_text):
+            try:
+                rewrite = client.invoke(
+                    [
+                        SystemMessage(
+                            content=_build_system_prompt(
+                                mode,
+                                resolved_persona,
+                                tone_guidance,
+                                help_intent=help_intent,
+                                answer_seeking=answer_seeking,
+                                attempt=attempt,
+                            )
+                        ),
+                        HumanMessage(
+                            content=(
+                                "The student asked:\n"
+                                f"{student_answer.strip() or '[empty]'}\n\n"
+                                "Your previous hint stated the answer. Do not show it:\n"
+                                f"{hint_text}\n\n"
+                                "Rewrite hint_text. "
+                                f"{_hint_length_rule(mode)}"
+                                "Do not say what the thing is, what it is like, or what it is used for. "
+                                "Simple words. Exactly one question mark, on the last line. "
+                                'Return JSON only: {"hint_text":"...","interaction_score":0.3}'
+                            )
+                        ),
+                    ],
+                    max_tokens=_tutor_llm_max_tokens(),
+                )
+                rewritten, rewrite_score, rewrite_err = _parse_llm_json_payload(
+                    _llm_response_text(rewrite.content)
+                )
+                if rewritten and not rewrite_err and not _looks_like_direct_answer(rewritten):
+                    hint_text = rewritten
+                    parsed_score = (
+                        rewrite_score if rewrite_score is not None else parsed_score
+                    )
+                    parse_err = None
+            except Exception:
+                pass
 
     except Exception as exc:
         return {

@@ -186,9 +186,14 @@ _SOCRATIC_GUARDRAILS = """
    verdict: \"Yes — that's right.\", \"Not quite.\", or \"Partly right.\"
 10. VALIDATE ATTEMPTS BEFORE MOVING ON: If their latest message answers YOUR previous
    follow-up, sentence 1 must say whether it is correct, not quite, or partly right.
-   Only then give the next clue and one new question. If they are wrong, do not dump
-   the correct fact — say not quite, give a smaller clue, and ask again.
-11. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
+   Only then give the next clue and one question about the SAME idea. If they are wrong,
+   do not dump the correct fact — say not quite, give a smaller clue, and ask again.
+11. STAY ON THEIR QUESTION: Every clue and the closing question must be a smaller piece
+   of the question the student originally asked. Do not switch to a related event,
+   landform, or next chapter idea.
+   BAD (they asked \"What are tectonic plates?\"): \"If plates pull apart, what surface feature forms?\"
+   GOOD: \"Are those puzzle pieces the hard outer shell, or the soft hot layer under it?\"
+12. JSON ONLY: Return a single JSON object with hint_text and interaction_score—no extra keys.
 """.strip()
 
 # Few-shot demonstrations: native tutor voice (no meta \"text/excerpt\" references).
@@ -361,6 +366,18 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "student": "is it oxygen?",
         "hint": "Yes — oxygen is right. If gills could not pick that gas from water, what would the fish run out of?",
     },
+    {
+        "persona": "practical_encourager",
+        "mode": "scaffold",
+        "student": "not sure",
+        "hint": "That's okay. A plate is one hard piece of the Earth's outer shell. Is that piece the ground we stand on, or the soft hot layer under it?",
+    },
+    {
+        "persona": "curious_explorer",
+        "mode": "scaffold",
+        "student": "I'm not sure",
+        "hint": "That's okay. We are still asking what a plate is. Is it a solid piece of crust, or the melted rock underneath?",
+    },
 ]
 
 _default_bkt: Optional[ScienceBKT] = None
@@ -381,6 +398,8 @@ FRUSTRATION_SUCCESS_CLEAR_THRESHOLD = 0.78
 _CHAT_FRUSTRATION_PHRASES: tuple[str, ...] = (
     r"\bi\s+don'?t\s+know\b",
     r"\bno\s+idea\b",
+    r"\bnot\s+sure\b",
+    r"\bunsure\b",
     r"\bi'?m\s+stuck\b",
     r"\bconfused\b",
     r"\bdon'?t\s+understand\b",
@@ -764,8 +783,9 @@ def _tone_guidance_from_frustration(resolution: FrustrationResolution) -> str:
             "'You said \"...\", but...' / 'You said X, but earlier...').\n"
             "- Do not stack reminders about past mistakes or prior turns; one gentle fix, then move on.\n"
             "- Use short sentences; one small idea; exactly ONE very easy next-step or yes/no question.\n"
-            "- If they say 'I don't know' / 'no idea', answer with warmth first—never imply they should "
-            "already know the answer."
+            "- If they say 'I don't know' / 'not sure' / 'no idea', open with calm encouragement "
+            "(\"That's okay\") and never imply they should already know the answer. "
+            "Do not say \"Not quite\", \"Wrong\", or \"Incorrect\" — they did not guess a fact."
         )
     if resolution.level == "medium":
         return (
@@ -1025,7 +1045,14 @@ _HELP_INTENT_RE = re.compile(
     r"(?:stuck|confused|lost)(?:\s+on this(?: step)?)?|"
     r"help(?:\s+me)?(?:\s+please)?|"
     r"idk|"
-    r"i\s+don['’]?t\s+(?:know|get|understand)(?:\s+it|\s+this)?"
+    r"i\s+don['’]?t\s+(?:know|get|understand)(?:\s+it|\s+this)?|"
+    r"(?:i(?:['’]?m|\s+am)\s+)?not\s+sure(?:\s+about\s+(?:this|that|it))?|"
+    r"(?:i(?:['’]?m|\s+am)\s+)?unsure|"
+    r"no\s+idea|"
+    r"no\s+clue|"
+    r"dunno|"
+    r"i\s+have\s+no\s+idea|"
+    r"not\s+really(?:\s+sure)?"
     r")[\s!.?…]*$",
     re.IGNORECASE,
 )
@@ -1434,7 +1461,12 @@ def _build_system_prompt(
             "The latest student message is a plea for help (hint / stuck / I don't know). "
             "It is NOT a science answer and NOT agreement with your last idea.\n"
             "They are stuck on YOUR previous follow-up question.\n"
-            "Give one smaller clue toward THAT question. Then ask a simpler version of it.\n"
+            "Give one smaller clue toward THAT question. Then ask a simpler version of the "
+            "same idea. Do not switch to a different event or landform.\n"
+            "Do NOT open with a verdict. \"Not sure\", \"I don't know\", and \"no idea\" are not "
+            "wrong answers. Never say \"Not quite\", \"Wrong\", or \"Incorrect\".\n"
+            "If frustration_signal_level is high, sentence 1 must be calm encouragement "
+            "such as \"That's okay.\" Then the smaller clue and one easier question.\n"
             "NEVER write 'you thought', 'you mentioned', 'you said', or 'you picked' unless "
             "those words appear on a Student line. Tutor lines are your own previous words.\n\n"
         )
@@ -1447,7 +1479,8 @@ def _build_system_prompt(
             "- Correct: \"Yes — that's right.\" (you may echo 2–4 of their words)\n"
             "- Wrong: \"Not quite.\" Then a smaller clue. Do NOT then state the correct fact.\n"
             "- Partial: \"Partly right — you got [their correct bit].\"\n"
-            "Only AFTER the verdict: one next Socratic step and ONE new question.\n"
+            "Only AFTER the verdict: one smaller step and ONE question that is still about "
+            "the student's original question. Do not move on to a related phenomenon.\n"
             "Analytical Coach: verdict on its own first line, then 3 numbered clues, then the question.\n"
             "NEVER skip the verdict and jump to a new topic.\n\n"
         )
@@ -1456,6 +1489,19 @@ def _build_system_prompt(
             "--- Attribution ---\n"
             "Only echo words from Student lines. Never treat a Tutor line as something "
             "the learner thought or said.\n\n"
+        )
+
+    if help_intent:
+        thread_line = (
+            "- THREAD: They did not answer your last question. They are unsure. "
+            "Do not judge the reply right or wrong. One smaller clue about the same idea, "
+            "then one easier question about that same idea.\n"
+        )
+    else:
+        thread_line = (
+            "- THREAD: If they answered your last question, verdict first (right / not quite / partly), "
+            "then one clue that stays on their original question. Never skip the verdict, "
+            "and never jump to a different idea.\n"
         )
 
     return (
@@ -1471,8 +1517,7 @@ def _build_system_prompt(
         f"{state_config}\n\n"
         f"{help_block}"
         f"--- Conversational continuity ---\n"
-        f"- THREAD: If they answered your last question, verdict first (right / not quite / partly), "
-        f"then one next clue. Never skip the verdict.\n"
+        f"{thread_line}"
         f"- MEMORY: Echo at most 2–4 words from a Student line only.\n"
         f"- FIGURES / LABELS: Do not mention figures, diagrams, exercises, tables, or pages.\n"
         f"- SENTIMENT ADAPTATION: {tone_guidance}\n"
@@ -1498,22 +1543,25 @@ def _correction_protocol(
         return (
             "--- Correction-first protocol (answer-seeking) ---\n"
             "They asked a science question. Do not answer it. Clues / riddles only, "
-            "then one prediction question.\n\n"
+            "then one prediction question about that same question. Do not ask about "
+            "a neighboring event or the next chapter idea.\n\n"
         )
     if attempt:
         if persona == "analytical_coach":
             return (
                 "--- Correction-first protocol (attempt · Analytical Coach) ---\n"
                 "Line 1 (not numbered): Yes that's right / Not quite / Partly right.\n"
-                "Then 3 numbered clues for the NEXT small step (or a smaller version of "
-                "the same question if they were wrong). End with one question.\n"
+                "Then 3 numbered clues that stay on the student's original question. "
+                "End with one question about that same idea, not a new phenomenon.\n"
                 "If wrong, do not write the correct fact in the 3 lines.\n\n"
             )
         return (
             "--- Correction-first protocol (attempt) ---\n"
-            "Sentence 1 is the verdict. Sentence 2 is one clue. Then one question. "
-            "If they are right: confirm their words, then the next small step.\n"
-            "If they are wrong: say not quite, contrast, ask again — do not dump the answer.\n\n"
+            "Sentence 1 is the verdict. Sentence 2 is one clue about the same idea. "
+            "Then one question that is still about the question they first asked.\n"
+            "If they are right: confirm their words, then a smaller piece of that same idea.\n"
+            "If they are wrong: say not quite, contrast, ask again — do not dump the answer "
+            "and do not change the subject.\n\n"
         )
     if persona == "analytical_coach":
         return (
@@ -2119,11 +2167,27 @@ def generate_socratic_hint(
     help_prefix = ""
     if help_intent:
         prior = last_follow_up or "(no previous tutor question — give a tiny clue on the topic)"
+        unsure_tone = ""
+        if frustration_resolution.level == "high":
+            unsure_tone = (
+                "Stored frustration is HIGH. Sentence 1 must be calm encouragement "
+                "(\"That's okay\"). Do not say Not quite, Wrong, or Incorrect.\n"
+            )
+        elif frustration_resolution.level == "medium":
+            unsure_tone = (
+                "Stored frustration is MEDIUM. Be gentle. Do not say Not quite.\n"
+            )
         help_prefix = (
-            "TURN TYPE: help_request. The student did NOT answer. They are stuck on your "
-            f"previous follow-up:\n\"{prior}\"\n"
-            "Scaffold THAT question with one smaller clue. Do not invent what they thought. "
-            "Do not give the full definition or formula. interaction_score should be 0.15–0.30.\n\n"
+            "TURN TYPE: help_request. The student did NOT answer your previous question. "
+            "\"Not sure\" / \"I don't know\" means they are stuck on it, not that their "
+            "science guess was wrong.\n"
+            f"Previous follow-up:\n\"{prior}\"\n"
+            f"{unsure_tone}"
+            "Scaffold THAT question with one smaller clue about the same idea they asked. "
+            "Do not switch to a different event, landform, or chapter idea. "
+            "Do not invent what they thought. "
+            "Do not give the full definition or formula. Do not open with Not quite. "
+            "interaction_score should be 0.15–0.30.\n\n"
         )
     elif answer_seeking:
         help_prefix = (
@@ -2132,14 +2196,16 @@ def generate_socratic_hint(
             "Do NOT answer it "
             "(no \"fish use gills to take oxygen from water\", "
             "no \"acids turn blue litmus red\", no \"sodium is in salt / nerves / fluids\"). "
-            "Clues + one prediction question only. interaction_score 0.20–0.40.\n\n"
+            "Clues + one prediction question about the same thing they asked. "
+            "Do not drift to a related event. interaction_score 0.20–0.40.\n\n"
         )
     elif attempt:
         help_prefix = (
             "TURN TYPE: attempt. They replied to your previous follow-up:\n"
             f"\"{last_follow_up}\"\n"
             "Validate that reply FIRST. Sentence 1 must be Yes that's right / Not quite / "
-            "Partly right. Only then give one next Socratic step and one new question. "
+            "Partly right. Only then one smaller step and one question that stays on "
+            "their original question. Do not move to a different idea. "
             "If wrong, do not dump the correct fact. Score clearly: correct usually ≥0.78; "
             "wrong/vague usually ≤0.35.\n\n"
         )

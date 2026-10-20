@@ -370,13 +370,19 @@ _FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
         "persona": "practical_encourager",
         "mode": "scaffold",
         "student": "not sure",
-        "hint": "That's okay. A plate is one hard piece of the Earth's outer shell. Is that piece the ground we stand on, or the soft hot layer under it?",
+        "hint": "No rush. A plate is one hard piece of the Earth's outer shell. Is that piece the ground we stand on, or the soft hot layer under it?",
     },
     {
         "persona": "curious_explorer",
         "mode": "scaffold",
         "student": "I'm not sure",
-        "hint": "That's okay. We are still asking what a plate is. Is it a solid piece of crust, or the melted rock underneath?",
+        "hint": "We can slow this down. We are still asking what a plate is. Is it a solid piece of crust, or the melted rock underneath?",
+    },
+    {
+        "persona": "practical_encourager",
+        "mode": "balanced",
+        "student": "I'm stuck on this step",
+        "hint": "This bit is tricky. Stay with the hard outer shell, not the hot layer under it. Is the shell one solid cover, or broken into separate pieces?",
     },
 ]
 
@@ -783,9 +789,11 @@ def _tone_guidance_from_frustration(resolution: FrustrationResolution) -> str:
             "'You said \"...\", but...' / 'You said X, but earlier...').\n"
             "- Do not stack reminders about past mistakes or prior turns; one gentle fix, then move on.\n"
             "- Use short sentences; one small idea; exactly ONE very easy next-step or yes/no question.\n"
-            "- If they say 'I don't know' / 'not sure' / 'no idea', open with calm encouragement "
-            "(\"That's okay\") and never imply they should already know the answer. "
-            "Do not say \"Not quite\", \"Wrong\", or \"Incorrect\" — they did not guess a fact."
+            "- If they say 'I don't know', 'not sure', 'no idea', or 'I'm stuck', empathize in one "
+            "short line, then one smaller clue. Vary the empathy. Do NOT always say \"That's okay\". "
+            "Other openings: \"No rush.\", \"We can slow this down.\", \"This bit is tricky.\", "
+            "\"Let's take just this piece.\" Never imply they should already know. "
+            "Do not say \"Not quite\", \"Wrong\", or \"Incorrect\", and do not hand them the answer."
         )
     if resolution.level == "medium":
         return (
@@ -1461,12 +1469,14 @@ def _build_system_prompt(
             "The latest student message is a plea for help (hint / stuck / I don't know). "
             "It is NOT a science answer and NOT agreement with your last idea.\n"
             "They are stuck on YOUR previous follow-up question.\n"
-            "Give one smaller clue toward THAT question. Then ask a simpler version of the "
-            "same idea. Do not switch to a different event or landform.\n"
-            "Do NOT open with a verdict. \"Not sure\", \"I don't know\", and \"no idea\" are not "
-            "wrong answers. Never say \"Not quite\", \"Wrong\", or \"Incorrect\".\n"
-            "If frustration_signal_level is high, sentence 1 must be calm encouragement "
-            "such as \"That's okay.\" Then the smaller clue and one easier question.\n"
+            "Empathize in one short line, then ONE smaller clue toward THAT question, "
+            "then a simpler question on the same idea. Do not switch to a different event or landform.\n"
+            "Do NOT give the finished fact. A stuck or unsure student still has to answer your question.\n"
+            "Do NOT open with a verdict. \"Not sure\", \"I don't know\", \"I'm stuck\", and \"no idea\" "
+            "are not wrong answers. Never say \"Not quite\", \"Wrong\", or \"Incorrect\".\n"
+            "Vary the empathy. Do not always say \"That's okay\". Use a different short line such as "
+            "\"No rush.\", \"We can slow this down.\", \"This bit is tricky.\", or "
+            "\"Let's take just this piece.\" If frustration_signal_level is high, keep that line warmer.\n"
             "NEVER write 'you thought', 'you mentioned', 'you said', or 'you picked' unless "
             "those words appear on a Student line. Tutor lines are your own previous words.\n\n"
         )
@@ -2170,24 +2180,26 @@ def generate_socratic_hint(
         unsure_tone = ""
         if frustration_resolution.level == "high":
             unsure_tone = (
-                "Stored frustration is HIGH. Sentence 1 must be calm encouragement "
-                "(\"That's okay\"). Do not say Not quite, Wrong, or Incorrect.\n"
+                "Stored frustration is HIGH. Empathize in one warm short line, then help. "
+                "Do not always say That's okay. Do not say Not quite, Wrong, or Incorrect.\n"
             )
         elif frustration_resolution.level == "medium":
             unsure_tone = (
-                "Stored frustration is MEDIUM. Be gentle. Do not say Not quite.\n"
+                "Stored frustration is MEDIUM. Empathize briefly, then help. "
+                "Do not say Not quite.\n"
             )
         help_prefix = (
             "TURN TYPE: help_request. The student did NOT answer your previous question. "
-            "\"Not sure\" / \"I don't know\" means they are stuck on it, not that their "
-            "science guess was wrong.\n"
+            "\"Not sure\", \"I don't know\", and \"I'm stuck on this step\" mean they need "
+            "help with it, not that a science guess was wrong.\n"
             f"Previous follow-up:\n\"{prior}\"\n"
             f"{unsure_tone}"
-            "Scaffold THAT question with one smaller clue about the same idea they asked. "
-            "Do not switch to a different event, landform, or chapter idea. "
-            "Do not invent what they thought. "
-            "Do not give the full definition or formula. Do not open with Not quite. "
-            "interaction_score should be 0.15–0.30.\n\n"
+            "Sentence 1: one short empathic line. Vary it (No rush / We can slow this down / "
+            "This bit is tricky / Let's take just this piece). Do not reuse That's okay every time.\n"
+            "Then ONE smaller clue about the same idea they asked. Do not state the finished fact, "
+            "definition, or formula. Do not switch to a different event, landform, or chapter idea.\n"
+            "Then one easier question on that same idea. Do not invent what they thought. "
+            "Do not open with Not quite. interaction_score should be 0.15–0.30.\n\n"
         )
     elif answer_seeking:
         help_prefix = (
